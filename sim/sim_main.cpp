@@ -17,6 +17,7 @@
 //   --cmd-gap MS        idle time after each command (default 1 ms)
 //   --probe T           at T seconds run the PocketStation probes tools/ps_probe.py runs
 //   --serve PORT        run as a virtual PocketStation on TCP PORT (docked; see serve_line)
+//   --bench             print how fast the run went against real time
 //
 // Bus timing mirrors ps_snac_link.sv / ps_snac_card.sv from the PocketStation core
 // (Jamie Blanks, GPL-2.0-or-later): 250 kHz, LSB first, clock idles high, ack
@@ -32,6 +33,7 @@
 #include <string>
 #include <vector>
 #include <cerrno>
+#include <chrono>
 #include <sys/stat.h>
 #ifdef _WIN32
 #include <winsock2.h>
@@ -458,6 +460,7 @@ int main(int argc, char** argv) {
     std::string card_file, dump_file;
     double seconds = 3.0, dock_t = -1, test_t = -1, probe_t = -1;
     int serve_port = 0;
+    bool bench = false;
     const char* names[5] = {"enter", "right", "left", "down", "up"};
 
     for (int i = 1; i < argc; i++) {
@@ -474,6 +477,7 @@ int main(int argc, char** argv) {
         else if (a == "--cmd-gap") cmd_gap_ms = atof(next().c_str());
         else if (a == "--probe") probe_t = atof(next().c_str());
         else if (a == "--serve") serve_port = atoi(next().c_str());
+        else if (a == "--bench") bench = true;
         else if (a == "--press") {
             std::string p = next();
             size_t at = p.find('@');
@@ -530,6 +534,7 @@ int main(int argc, char** argv) {
     for (int i = 0; i < 64; i++) tick();
     top->reset = 0;
     start = cyc;
+    auto wall0 = std::chrono::steady_clock::now();
 
     int rc = 0;
     if (serve_port) {
@@ -553,6 +558,10 @@ int main(int argc, char** argv) {
         step();
     }
 
+    if (bench) {
+        double wall = std::chrono::duration<double>(std::chrono::steady_clock::now() - wall0).count();
+        printf("\n%.1f s of PocketStation time took %.1f s: %.2fx real time\n", now(), wall, now() / wall);
+    }
     uint8_t px[32][32];
     read_panel(px);
     write_pgm(out + "/lcd_final.pgm", px, 5);
