@@ -40,7 +40,7 @@ namespace fs = std::filesystem;
 using ps::u8;
 
 static const char* APP_NAME = "MC/PS MemCard Pro";
-static const char* APP_VERSION = "0.1.0";
+static const char* APP_VERSION = "0.1.3";
 
 // Colours from the app mockup.
 static ImU32 Col(unsigned rgb, int a = 255) { return IM_COL32((rgb >> 16) & 255, (rgb >> 8) & 255, rgb & 255, a); }
@@ -171,7 +171,9 @@ struct App {
   bool UseBios(const std::string& path) {
     auto rom = ReadFile(path);
     if (rom.size() != 16384) { Note("That isn't a PocketStation BIOS: it should be exactly 16 KB."); return false; }
+    if (have_bios) SaveState();   // keep the unit as it was under the BIOS being replaced
     m.LoadBios(rom);
+    bios_rom = rom;
     have_bios = true;
     cfg.bios = path;
     cfg.Save();
@@ -181,8 +183,86 @@ struct App {
 
   void PowerOn() {
     m.LoadCard(cardimg);
+    if (RestoreState()) return;
     m.Reset();
     clock_sync_at = now + 1.0;   // once the kernel has finished starting up
+  }
+
+  // --- the unit's battery: kept in PocketStation.state beside the exe ------------------------
+  // A real PocketStation keeps its RAM, its clock and whatever it was doing while it sits in a
+  // drawer. The app does the same: the whole unit is saved on exit (and every 30 s, in case
+  // Windows doesn't let it finish) and picked up again at start, with the clock moved on by the
+  // time the app was closed. The card isn't in it; it stays in its own file.
+  std::vector<u8> bios_rom;
+  double state_save_at = -1;
+  std::string StatePath() const { return dir + "PocketStation.state"; }
+  static u32 Fnv(const std::vector<u8>& v) { u32 h = 2166136261u; for (u8 b : v) h = (h ^ b) * 16777619u; return h; }
+
+  static long long DaysFromCivil(int y, int m, int d) {   // Howard Hinnant's algorithm
+    y -= m <= 2;
+    long long era = (y >= 0 ? y : y - 399) / 400;
+    unsigned yoe = (unsigned)(y - era * 400), doy = (153 * (m + (m > 2 ? -3 : 9)) + 2) / 5 + d - 1;
+    unsigned doe = yoe * 365 + yoe / 4 - yoe / 100 + doy;
+    return era * 146097 + (long long)doe - 719468;
+  }
+  static void CivilFromDays(long long z, int& y, int& m, int& d) {
+    z += 719468;
+    long long era = (z >= 0 ? z : z - 146096) / 146097;
+    unsigned doe = (unsigned)(z - era * 146097), yoe = (doe - doe / 1460 + doe / 36524 - doe / 146096) / 365;
+    unsigned doy = doe - (365 * yoe + yoe / 4 - yoe / 100), mp = (5 * doy + 2) / 153;
+    d = (int)(doy - (153 * mp + 2) / 5 + 1);
+    m = (int)(mp < 10 ? mp + 3 : mp - 9);
+    y = (int)(yoe + era * 400) + (m <= 2);
+  }
+  static int FromBcd(u32 v) { return (int)((v >> 4 & 15) * 10 + (v & 15)); }
+
+  // Moves the unit's clock on by `secs`, as the crystal would have while the app was closed.
+  void AdvanceClock(long long secs) {
+    if (secs <= 0) return;
+    u32 c = m.rtc.clock, k = m.rtc.calendar;
+    int ss = FromBcd(c), mi = FromBcd(c >> 8), hh = FromBcd(c >> 16), dow = (int)(c >> 24 & 7);
+    int yy = FromBcd(k >> 16), mo = FromBcd(k >> 8), dd = FromBcd(k);
+    if (mo < 1 || mo > 12 || dd < 1 || dd > 31 || hh > 23 || mi > 59 || ss > 59) return;
+    long long days = DaysFromCivil(2000 + yy, mo, dd);
+    long long t = days * 86400 + hh * 3600 + mi * 60 + ss + secs;
+    long long nd = t / 86400, rem = t % 86400;
+    int y, mm, d;
+    CivilFromDays(nd, y, mm, d);
+    if (dow >= 1 && dow <= 7) dow = (int)((dow - 1 + (nd - days)) % 7) + 1;
+    m.SetClock((u32)dow << 24 | Bcd((int)(rem / 3600)) << 16 | Bcd((int)(rem / 60 % 60)) << 8 | Bcd((int)(rem % 60)),
+               (u32)Bcd(y % 100) << 16 | (u32)Bcd(mm) << 8 | Bcd(d));
+  }
+
+  void SaveState() {
+    if (!have_bios) return;
+    std::vector<u8> out = {'M', 'C', 'P', 'S', 'B', 'A', 'T', '1'};
+    u32 h = Fnv(bios_rom);
+    long long wall = (long long)time(nullptr);
+    out.insert(out.end(), (u8*)&h, (u8*)&h + 4);
+    out.insert(out.end(), (u8*)&wall, (u8*)&wall + 8);
+    auto st = m.SaveState();
+    out.insert(out.end(), st.begin(), st.end());
+    std::string p = StatePath(), tmp = p + ".tmp";
+    FILE* f = fopen(tmp.c_str(), "wb");
+    if (!f) return;
+    bool ok = fwrite(out.data(), 1, out.size(), f) == out.size();
+    ok = fclose(f) == 0 && ok;
+    if (!ok) { remove(tmp.c_str()); return; }
+    remove(p.c_str());
+    rename(tmp.c_str(), p.c_str());
+  }
+
+  bool RestoreState() {
+    auto d = ReadFile(StatePath());
+    if (d.size() < 20 || memcmp(d.data(), "MCPSBAT1", 8) != 0) return false;
+    u32 h; long long wall;
+    memcpy(&h, &d[8], 4);
+    memcpy(&wall, &d[12], 8);
+    if (h != Fnv(bios_rom)) return false;   // saved with another BIOS: start fresh
+    if (!m.LoadState(std::vector<u8>(d.begin() + 20, d.end()))) return false;
+    m.LoadCard(cardimg);
+    AdvanceClock((long long)time(nullptr) - wall);
+    return true;
   }
 
   // Sets the PocketStation's clock from the PC, the way a PS1 game does: docked, BU command 5Ch
@@ -278,6 +358,8 @@ struct App {
     if (docked && now >= undock_at) { docked = false; m.SetDocked(false); }
     if (clock_sync_at >= 0 && now >= clock_sync_at) { clock_sync_at = -1; SyncClock(); }
     m.RunFor(std::min(dt, 0.1));
+    if (state_save_at < 0) state_save_at = now + 30;
+    if (now >= state_save_at) { SaveState(); state_save_at = now + 30; }
     if (m.CardDirty()) { cardimg = m.Card(); card_save_at = now + 1.0; }
     if (card_save_at >= 0 && now >= card_save_at) { card::Save(CardPath(), cardimg); card_save_at = -1; }
     server.Poll();
@@ -806,6 +888,7 @@ int main(int argc, char** argv) {
   }
 
   if (app.card_save_at >= 0) card::Save(app.CardPath(), app.cardimg);
+  if (shot.empty()) app.SaveState();
   app.server.Close();
   ImGui_ImplSDLRenderer2_Shutdown();
   ImGui_ImplSDL2_Shutdown();

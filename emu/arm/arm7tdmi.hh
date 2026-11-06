@@ -333,6 +333,20 @@ private:
     return BANK_INVALID;
   }
 
+public:
+  // PocketStation: savestate fields, visited by `io(field)` for both saving and loading.
+  template<typename IO> void StateFields(IO&& io) {
+    io(state); io(pipe); io(irq_line); io(fiq_line); io(latch_irq_disable);
+    io(ldm_usermode_conflict); io(cpu_mode_is_invalid);
+  }
+
+  // PocketStation: after a savestate restored `state`, point the SPSR alias at the right bank.
+  void RestoreSpsrPointer() {
+    auto bank = GetRegisterBankByMode(state.cpsr.f.mode);
+    p_spsr = bank != BANK_NONE ? &state.spsr[bank] : &state.cpsr;
+  }
+private:
+
   void ClearLDMUsermodeConflictFlag() {
     ldm_usermode_conflict = false;
   }

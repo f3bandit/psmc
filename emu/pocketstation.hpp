@@ -79,6 +79,11 @@ struct PocketStation {
   std::vector<int16_t> TakeAudio() { std::vector<int16_t> a; a.swap(audio); return a; }
   bool CardDirty() { bool d = flash.dirty; flash.dirty = false; return d; }
 
+  // The whole unit as a real one keeps it on its battery: RAM, registers, CPU, clock. The card
+  // (flash) and the BIOS are not included; they are loaded on their own.
+  std::vector<u8> SaveState() const;
+  bool LoadState(const std::vector<u8>& data);
+
   // --- internals, public for the bus and tests ---------------------------------------------
   u64 t = 0;                    // master ticks, 16.16
   u64 next_xtal = 0;            // when the next crystal tick falls, 16.16

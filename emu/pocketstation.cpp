@@ -9,6 +9,7 @@
 
 #include <algorithm>
 #include <cstring>
+#include <type_traits>
 
 namespace ps {
 
@@ -62,6 +63,67 @@ void PocketStation::Reset() {
   spi = Spi{};
   prefetch_q = ramdata_q = 0;
   cpu->Reset();
+}
+
+// ---------------------------------------------------------------------------- savestate --
+
+namespace {
+constexpr char STATE_MAGIC[8] = {'M', 'C', 'P', 'S', 'S', 'T', 'A', '1'};
+
+struct Writer {
+  std::vector<u8> out;
+  template<typename T> void Put(const T& v) {
+    static_assert(std::is_trivially_copyable<T>::value, "plain data only");
+    const u8* p = reinterpret_cast<const u8*>(&v);
+    out.insert(out.end(), p, p + sizeof(T));
+  }
+};
+
+struct Reader {
+  const std::vector<u8>& in;
+  size_t pos = 0;
+  bool ok = true;
+  template<typename T> void Get(T& v) {
+    static_assert(std::is_trivially_copyable<T>::value, "plain data only");
+    if (pos + sizeof(T) > in.size()) { ok = false; return; }
+    std::memcpy(reinterpret_cast<u8*>(&v), in.data() + pos, sizeof(T));
+    pos += sizeof(T);
+  }
+};
+}  // namespace
+
+// Everything below is listed in one place for both directions, so the two can't drift apart.
+template<typename IO> static void StateFields(PocketStation& m, IO&& io) {
+  io(m.t); io(m.next_xtal);
+  io(m.sram); io(m.prefetch_q); io(m.ramdata_q);
+  io(m.mem); io(m.sig); io(m.intc); io(m.tmr); io(m.clk); io(m.rtc); io(m.lcd);
+  io(m.pio); io(m.dac); io(m.lvd_ctrl); io(m.irda_static); io(m.irda_dynamic);
+  io(m.spi); io(m.docked);
+  io(m.flash.seq); io(m.flash.sector); io(m.flash.page_valid); io(m.flash.page); io(m.flash.delay);
+  io(m.scheduler.pending);
+  m.cpu->StateFields(io);
+}
+
+std::vector<u8> PocketStation::SaveState() const {
+  Writer w;
+  for (char ch : STATE_MAGIC) w.Put(ch);
+  StateFields(const_cast<PocketStation&>(*this), [&](auto& v) { w.Put(v); });
+  return w.out;
+}
+
+bool PocketStation::LoadState(const std::vector<u8>& data) {
+  if (data.size() < 8 || std::memcmp(data.data(), STATE_MAGIC, 8) != 0) return false;
+  // Restore into a copy first, so a short or mismatched file leaves the unit untouched.
+  Reader r{data, 8};
+  PocketStation probe;
+  StateFields(probe, [&](auto& v) { r.Get(v); });
+  if (!r.ok || r.pos != data.size()) return false;
+  Reader r2{data, 8};
+  StateFields(*this, [&](auto& v) { r2.Get(v); });
+  cpu->RestoreSpsrPointer();
+  host = Host{};
+  buttons = 0;
+  return true;
 }
 
 // --------------------------------------------------------------------------------- time --

@@ -28,6 +28,9 @@ int FreeBlocks(const std::vector<u8>& card);
 // 3904-byte header), a PS3 export (.psv) or a single save (.mcs / .psx / .ps1: 128-byte directory frame + data),
 // which is placed on `into`. Returns an error message, empty on success.
 std::string Load(const std::string& path, std::vector<u8>& into);
+std::string LoadRaw(const std::string& path, std::vector<u8>& into);   // without FixAppNames
+// Gives PocketStation apps saved under a hyphenated name the 'P' the kernel looks for.
+int FixAppNames(std::vector<u8>& card);
 bool Save(const std::string& path, const std::vector<u8>& card);
 // One file as a single-save .mcs (directory frame + its blocks).
 std::vector<u8> ExportSave(const std::vector<u8>& card, int first_block);

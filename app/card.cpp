@@ -131,7 +131,36 @@ static std::string Place(std::vector<u8>& c, const u8* frame, const u8* data, si
   return "";
 }
 
+// A PocketStation executable's directory name has 'P' where a save has its hyphen
+// (BASLUSP00892..., not BASLUS-00892...): the kernel only lists files named that way as apps.
+// Saves copied by tools that "normalised" the name get it back here.
+int FixAppNames(std::vector<u8>& c) {
+  int fixed = 0;
+  for (int b = 1; b < 16; b++) {
+    u8* d = &c[b * 128];
+    if (d[0] != 0x51 || d[0x10] != '-') continue;
+    const u8* f = &c[b * 8192];
+    if (!(f[0] == 'S' && f[1] == 'C' && f[0x52] == 'M' && f[0x53] == 'C' && f[0x54] == 'X')) continue;
+    int cur = b, n = 0;
+    while (cur >= 1 && cur < 16 && n++ < 15) {
+      u8* p = &c[cur * 128];
+      if (p[0x10] == '-') { p[0x10] = 'P'; p[127] = XorSum(p); }
+      int next = p[8] | p[9] << 8;
+      if (next == 0xFFFF) break;
+      cur = next + 1;
+    }
+    fixed++;
+  }
+  return fixed;
+}
+
 std::string Load(const std::string& path, std::vector<u8>& into) {
+  std::string err = LoadRaw(path, into);
+  if (err.empty()) FixAppNames(into);
+  return err;
+}
+
+std::string LoadRaw(const std::string& path, std::vector<u8>& into) {
   auto d = ReadAll(path);
   if (d.empty()) return "can't read " + path;
   if (into.size() != SIZE) into = Formatted();
