@@ -561,6 +561,8 @@ int main(int argc, char** argv) {
     if (bench) {
         double wall = std::chrono::duration<double>(std::chrono::steady_clock::now() - wall0).count();
         printf("\n%.1f s of PocketStation time took %.1f s: %.2fx real time\n", now(), wall, now() / wall);
+        FILE* bf2 = fopen((out + "/bench.txt").c_str(), "w");
+        if (bf2) { fprintf(bf2, "%.1f s of PocketStation time took %.1f s: %.2fx real time\n", now(), wall, now() / wall); fclose(bf2); }
     }
     uint8_t px[32][32];
     read_panel(px);
