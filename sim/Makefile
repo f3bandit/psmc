@@ -30,3 +30,14 @@ ps_sim_8m: $(SRCS) sim_main.cpp
 	rm -rf obj_8m
 	verilator $(VFLAGS) -DPS_CLK_SYS_HZ=7995392 -CFLAGS -DPS_CLK_SYS_HZ=7995392 -Mdir obj_8m $(SRCS) sim_main.cpp -o ps_sim_8m
 	cp obj_8m/ps_sim_8m .
+
+# Windows .exe of the 8 MHz build (cross-compiled with MinGW-w64, static, no DLLs needed)
+ps_sim_8m.exe: $(SRCS) sim_main.cpp
+	rm -rf obj_win
+	verilator --cc --exe -O3 --x-assign fast --x-initial fast -Wno-fatal -Wno-lint -Wno-style \
+	  --top-module ps_sim_top -DPS_CLK_SYS_HZ=7995392 -Mdir obj_win $(SRCS) sim_main.cpp -o ps_sim_8m.exe
+	$(MAKE) -C obj_win -f Vps_sim_top.mk -j 4 CXX=x86_64-w64-mingw32-g++ LINK=x86_64-w64-mingw32-g++ \
+	  OPT_FAST="-O3" OPT_SLOW="-O2" OPT_GLOBAL="-O2" \
+	  USER_CPPFLAGS="-DPS_CLK_SYS_HZ=7995392" \
+	  LDFLAGS="-static" LIBS="-lws2_32" ps_sim_8m.exe
+	cp obj_win/ps_sim_8m.exe .

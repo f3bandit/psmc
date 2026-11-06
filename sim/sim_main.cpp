@@ -33,11 +33,29 @@
 #include <vector>
 #include <cerrno>
 #include <sys/stat.h>
+#ifdef _WIN32
+#include <winsock2.h>
+#include <ws2tcpip.h>
+#include <direct.h>
+typedef SOCKET sock_t;
+#define SOCK_BAD INVALID_SOCKET
+#define MSG_NOSIGNAL 0
+static void sock_close(sock_t s) { closesocket(s); }
+static void sock_nonblock(sock_t s) { u_long one = 1; ioctlsocket(s, FIONBIO, &one); }
+static bool sock_would_block() { return WSAGetLastError() == WSAEWOULDBLOCK; }
+static int make_dir(const char* p) { return _mkdir(p); }
+#else
 #include <sys/socket.h>
 #include <netinet/in.h>
-#include <poll.h>
 #include <unistd.h>
 #include <fcntl.h>
+typedef int sock_t;
+#define SOCK_BAD (-1)
+static void sock_close(sock_t s) { close(s); }
+static void sock_nonblock(sock_t s) { fcntl(s, F_SETFL, O_NONBLOCK); }
+static bool sock_would_block() { return errno == EAGAIN || errno == EWOULDBLOCK; }
+static int make_dir(const char* p) { return mkdir(p, 0755); }
+#endif
 
 #ifndef PS_CLK_SYS_HZ
 #define PS_CLK_SYS_HZ 31981568
@@ -280,13 +298,13 @@ static void format_card(std::vector<uint8_t>& c) {
 //   lcd               {"ok":true,"w":32,"h":32,"levels":"<1024 hex digits, 0 light .. f dark>"}
 //   status            {"ok":true,"t":seconds,"led":0|1,"freq":N,"standby":0|1,"docked":0|1}
 //   dock 0|1          console power on the connector
-static int srv_fd = -1, cli_fd = -1;
+static sock_t srv_fd = SOCK_BAD, cli_fd = SOCK_BAD;
 static std::string cli_in;
 
 static void cli_send(const std::string& line) {
-    if (cli_fd < 0) return;
+    if (cli_fd == SOCK_BAD) return;
     std::string l = line + "\n";
-    if (send(cli_fd, l.data(), l.size(), MSG_NOSIGNAL) != (ssize_t)l.size()) { close(cli_fd); cli_fd = -1; }
+    if (send(cli_fd, l.data(), (int)l.size(), MSG_NOSIGNAL) != (int)l.size()) { sock_close(cli_fd); cli_fd = SOCK_BAD; }
 }
 
 static std::string hex(const std::vector<uint8_t>& v) {
@@ -336,15 +354,15 @@ static void serve_line(const std::string& line) {
 }
 
 static void serve_poll() {
-    if (srv_fd < 0) return;
-    if (cli_fd < 0) {
-        int c = accept(srv_fd, nullptr, nullptr);
-        if (c >= 0) { fcntl(c, F_SETFL, O_NONBLOCK); cli_fd = c; cli_in.clear(); printf("[serve] client connected\n"); }
+    if (srv_fd == SOCK_BAD) return;
+    if (cli_fd == SOCK_BAD) {
+        sock_t c = accept(srv_fd, nullptr, nullptr);
+        if (c != SOCK_BAD) { sock_nonblock(c); cli_fd = c; cli_in.clear(); printf("[serve] client connected\n"); }
         return;
     }
     char buf[2048];
-    ssize_t n = recv(cli_fd, buf, sizeof buf, 0);
-    if (n == 0 || (n < 0 && errno != EAGAIN && errno != EWOULDBLOCK)) { close(cli_fd); cli_fd = -1; printf("[serve] client gone\n"); return; }
+    int n = (int)recv(cli_fd, buf, sizeof buf, 0);
+    if (n == 0 || (n < 0 && !sock_would_block())) { sock_close(cli_fd); cli_fd = SOCK_BAD; printf("[serve] client gone\n"); return; }
     if (n > 0) cli_in.append(buf, n);
     size_t nl;
     while ((nl = cli_in.find('\n')) != std::string::npos) {
@@ -355,13 +373,17 @@ static void serve_poll() {
 }
 
 static bool serve_open(int port) {
+#ifdef _WIN32
+    WSADATA w;
+    WSAStartup(MAKEWORD(2, 2), &w);
+#endif
     srv_fd = socket(AF_INET, SOCK_STREAM, 0);
     int one = 1;
-    setsockopt(srv_fd, SOL_SOCKET, SO_REUSEADDR, &one, sizeof one);
+    setsockopt(srv_fd, SOL_SOCKET, SO_REUSEADDR, (const char*)&one, sizeof one);
     sockaddr_in a{};
     a.sin_family = AF_INET; a.sin_port = htons(port); a.sin_addr.s_addr = htonl(INADDR_ANY);
     if (bind(srv_fd, (sockaddr*)&a, sizeof a) || listen(srv_fd, 1)) { perror("serve"); return false; }
-    fcntl(srv_fd, F_SETFL, O_NONBLOCK);
+    sock_nonblock(srv_fd);
     printf("[serve] virtual PocketStation on port %d\n", port);
     return true;
 }
@@ -468,7 +490,7 @@ int main(int argc, char** argv) {
     if (test_t >= 0 && (dock_t < 0 || dock_t > test_t)) dock_t = test_t > 0.2 ? test_t - 0.2 : 0;
     if (probe_t >= 0 && (dock_t < 0 || dock_t > probe_t)) dock_t = probe_t > 0.2 ? probe_t - 0.2 : 0;
     next_snap = snap;
-    mkdir(out.c_str(), 0755);
+    make_dir(out.c_str());
 
     std::vector<uint8_t> rom(16384, 0), card(131072, 0);
     FILE* bf = fopen(bios.c_str(), "rb");

@@ -6,3 +6,7 @@ sim/out*/
 sim/*.log
 *.bin
 *.rom
+sim/obj_8m/
+sim/obj_win/
+sim/ps_sim_8m
+sim/*.exe
