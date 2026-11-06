@@ -15,6 +15,7 @@
 //                       and compare against flash through the save port
 //   --dump-card FILE    write the flash contents to FILE at the end
 //   --cmd-gap MS        idle time after each command (default 1 ms)
+//   --probe T           at T seconds run the PocketStation probes tools/ps_probe.py runs
 //
 // Bus timing mirrors ps_snac_link.sv / ps_snac_card.sv from the PocketStation core
 // (Jamie Blanks, GPL-2.0-or-later): 250 kHz, LSB first, clock idles high, ack
@@ -260,6 +261,30 @@ static void format_card(std::vector<uint8_t>& c) {
     c[63 * 128] = 'M'; c[63 * 128 + 1] = 'C'; c[63 * 128 + 127] = 'M' ^ 'C';
 }
 
+// The PocketStation probes tools/ps_probe.py runs on real hardware, for side-by-side comparison.
+static void raw_show(const char* name, const std::vector<uint8_t>& tx) {
+    bool ok;
+    auto rx = frame_cmd(tx, 0, (int)tx.size(), 6, false, &ok);
+    printf("[probe] %-26s %3zu/%-3zu bytes  %s\n", name, rx.size(), tx.size(), ok ? "complete" : "stopped");
+    for (size_t i = 0; i < rx.size(); i += 16) {
+        printf("    tx"); for (size_t k = i; k < i + 16 && k < tx.size(); k++) printf(" %02X", tx[k]); printf("\n");
+        printf("    rx"); for (size_t k = i; k < i + 16 && k < rx.size(); k++) printf(" %02X", rx[k]); printf("\n");
+    }
+}
+
+static void probe() {
+    printf("[probe] at t=%.4fs\n", now());
+    std::vector<uint8_t> id = {0x81, 0x53}; id.resize(10, 0);
+    raw_show("53h ID", id);
+    raw_show("58h version", {0x81, 0x58, 0, 0, 0});
+    std::vector<uint8_t> st = {0x81, 0x5A}; st.resize(21, 0);
+    raw_show("5Ah status", st);
+    std::vector<uint8_t> dt = {0x81, 0x5B, 0x00, 0, 0}; dt.resize(14, 0);
+    raw_show("5Bh FUNC 00h date/time", dt);
+    std::vector<uint8_t> mr = {0x81, 0x5B, 0x01, 0, 0x00, 0x00, 0x00, 0x04, 0x80, 0}; mr.resize(139, 0);
+    raw_show("5Bh FUNC 01h @04000000", mr);
+}
+
 static int card_test(const std::vector<uint8_t>& image) {
     int fails = 0;
     printf("[card] test at t=%.4fs\n", now());
@@ -304,7 +329,7 @@ int main(int argc, char** argv) {
     setvbuf(stdout, nullptr, _IONBF, 0);
     std::string bios = "../../PocketStation_MiSTer/BIOS/enhanced_bios.bin";
     std::string card_file, dump_file;
-    double seconds = 3.0, dock_t = -1, test_t = -1;
+    double seconds = 3.0, dock_t = -1, test_t = -1, probe_t = -1;
     const char* names[5] = {"enter", "right", "left", "down", "up"};
 
     for (int i = 1; i < argc; i++) {
@@ -319,6 +344,7 @@ int main(int argc, char** argv) {
         else if (a == "--card-test") test_t = atof(next().c_str());
         else if (a == "--dump-card") dump_file = next();
         else if (a == "--cmd-gap") cmd_gap_ms = atof(next().c_str());
+        else if (a == "--probe") probe_t = atof(next().c_str());
         else if (a == "--press") {
             std::string p = next();
             size_t at = p.find('@');
@@ -333,6 +359,7 @@ int main(int argc, char** argv) {
         } else { fprintf(stderr, "unknown option %s\n", a.c_str()); return 2; }
     }
     if (test_t >= 0 && (dock_t < 0 || dock_t > test_t)) dock_t = test_t > 0.2 ? test_t - 0.2 : 0;
+    if (probe_t >= 0 && (dock_t < 0 || dock_t > probe_t)) dock_t = probe_t > 0.2 ? probe_t - 0.2 : 0;
     next_snap = snap;
     mkdir(out.c_str(), 0755);
 
@@ -376,7 +403,7 @@ int main(int argc, char** argv) {
     start = cyc;
 
     int rc = 0;
-    bool docked = false, tested = false;
+    bool docked = false, tested = false, probed = false;
     uint64_t end = start + (uint64_t)(seconds * CLK_HZ);
     while (cyc < end) {
         if (!docked && dock_t >= 0 && now() >= dock_t) {
@@ -387,6 +414,7 @@ int main(int argc, char** argv) {
             tested = true;
             rc = card_test(card) ? 1 : 0;
         }
+        if (!probed && probe_t >= 0 && now() >= probe_t) { probed = true; probe(); }
         step();
     }
 
