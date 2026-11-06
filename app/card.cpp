@@ -156,13 +156,30 @@ int FixAppNames(std::vector<u8>& c) {
 
 // Apps that are tied to one PocketStation. When the PS1 game installs one, it reads the unit's
 // serial number (BU command 5Ah) and writes it into the app's file; on launch the app compares it
-// with the unit's own (kernel SWI 0Ah) and, on a mismatch, marks itself a copy and wipes its data.
-// A copy taken off the disc carries 0 there, so it is given this unit's serial here, as the
-// game's install would.
-struct BoundApp { const char* product; size_t serial_off; };
-static const BoundApp BOUND_APPS[] = {
-  {"BISLPMP86247", 0x7F0C},   // Metal Gear Solid Integral: MGS∫[FOXDIE]
+// with the unit's own (kernel SWI 0Ah) and, on a mismatch, marks itself a copy (コピー) and wipes
+// its data. Bringing one onto this unit is what the game's install does: this unit's serial is
+// written in. A copy off the disc carries 0; one dumped from another unit carries that unit's.
+struct BoundApp {
+  const char* product;            // directory name prefix
+  std::vector<size_t> serial_at;  // offsets within the file that hold the installed serial
 };
+static const BoundApp BOUND_APPS[] = {
+  // Metal Gear Solid Integral, MGS∫[FOXDIE]: 0x7F0C is checked at launch, 0x7F80 is the app's
+  // own copy of the serial it last ran on.
+  {"BISLPMP86247", {0x7F0C, 0x7F80}},
+};
+
+static u8* FileByte(std::vector<u8>& c, int first, size_t at) {
+  int cur = first;
+  for (size_t i = 0; i < at / 8192; i++) {
+    if (cur < 1 || cur >= 16) return nullptr;
+    int next = c[cur * 128 + 8] | c[cur * 128 + 9] << 8;
+    if (next == 0xFFFF) return nullptr;
+    cur = next + 1;
+  }
+  if (cur < 1 || cur >= 16) return nullptr;
+  return &c[cur * 8192 + at % 8192];
+}
 
 int BindApps(std::vector<u8>& c, uint32_t serial) {
   int bound = 0;
@@ -171,19 +188,19 @@ int BindApps(std::vector<u8>& c, uint32_t serial) {
     if (d[0] != 0x51) continue;
     for (auto& a : BOUND_APPS) {
       if (memcmp(d + 0x0A, a.product, strlen(a.product)) != 0) continue;
-      // Offsets are within the file, which may span several blocks.
-      size_t blk = a.serial_off / 8192, off = a.serial_off % 8192;
-      int cur = b;
-      for (size_t i = 0; i < blk && cur >= 1 && cur < 16; i++) {
-        int next = c[cur * 128 + 8] | c[cur * 128 + 9] << 8;
-        cur = next == 0xFFFF ? -1 : next + 1;
-      }
-      if (cur < 1 || cur >= 16) continue;
-      u8* p = &c[cur * 8192 + off];
+      u8* check = FileByte(c, b, a.serial_at[0]);
+      if (!check) continue;
       uint32_t have;
-      memcpy(&have, p, 4);
-      if (have != 0) continue;   // already installed on a unit
-      memcpy(p, &serial, 4);
+      memcpy(&have, check, 4);
+      if (have == serial) continue;
+      if (have == 0xFFFFFFFFu) continue;   // already wiped as a copy: nothing left to bind
+      for (size_t at : a.serial_at) {
+        u8* p = FileByte(c, b, at);
+        if (!p) continue;
+        uint32_t cur;
+        memcpy(&cur, p, 4);
+        if (at == a.serial_at[0] || cur == have) memcpy(p, &serial, 4);
+      }
       bound++;
     }
   }

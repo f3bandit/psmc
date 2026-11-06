@@ -16,7 +16,6 @@
 #include <ctime>
 #include <filesystem>
 #include <map>
-#include <random>
 #include <string>
 #include <vector>
 
@@ -41,7 +40,7 @@ namespace fs = std::filesystem;
 using ps::u8;
 
 static const char* APP_NAME = "MC/PS MemCard Pro";
-static const char* APP_VERSION = "0.1.5";
+static const char* APP_VERSION = "0.1.6";
 
 // Colours from the app mockup.
 static ImU32 Col(unsigned rgb, int a = 255) { return IM_COL32((rgb >> 16) & 255, (rgb >> 8) & 255, rgb & 255, a); }
@@ -68,6 +67,7 @@ static std::vector<u8> ReadFile(const std::string& path) {
 struct Settings {
   std::string bios, card;
   int port = 7550;
+  unsigned serial = 0;           // this unit's serial number, also kept in the saved state
   std::string path;
 
   void Load(const std::string& p) {
@@ -84,6 +84,7 @@ struct Settings {
       if (k == "bios") bios = v;
       else if (k == "card") card = v;
       else if (k == "port") port = atoi(v.c_str());
+      else if (k == "serial") serial = (unsigned)strtoul(v.c_str(), nullptr, 16);
     }
     fclose(f);
   }
@@ -91,6 +92,7 @@ struct Settings {
     FILE* f = fopen(path.c_str(), "w");
     if (!f) return;
     fprintf(f, "bios=%s\ncard=%s\nport=%d\n", bios.c_str(), card.c_str(), port);
+    if (serial) fprintf(f, "serial=%08X\n", serial);
     fclose(f);
   }
 };
@@ -186,12 +188,24 @@ struct App {
   // the saved state from then on.
   u32 Serial() const { return (u32)m.sig.serial_hi << 16 | m.sig.serial_lo; }
   void GiveSerial() {
-    if (Serial() != 0xFFFFFFFFu && Serial() != 0) return;
-    std::random_device rd;
-    u32 v = 0;
-    while (v == 0 || v == 0xFFFFFFFFu) v = rd() ^ (u32)time(nullptr);
+    u32 v = Serial();
+    if (v == 0xFFFFFFFFu || v == 0) v = cfg.serial;   // the state was lost: the ini remembers it
+    if (v == 0xFFFFFFFFu || v == 0) {
+      // A new unit. Mixed from the clock and this process, not std::random_device, which some
+      // MinGW runtimes don't back with real entropy.
+      uint64_t x = (uint64_t)std::chrono::high_resolution_clock::now().time_since_epoch().count();
+      x ^= (uint64_t)time(nullptr) << 32 ^ (uint64_t)(uintptr_t)this;
+      do {   // splitmix64
+        x += 0x9E3779B97F4A7C15ull;
+        uint64_t z = x;
+        z = (z ^ (z >> 30)) * 0xBF58476D1CE4E5B9ull;
+        z = (z ^ (z >> 27)) * 0x94D049BB133111EBull;
+        v = (u32)(z ^ (z >> 31));
+      } while (v == 0 || v == 0xFFFFFFFFu);
+    }
     m.sig.serial_lo = v & 0xFFFF;
     m.sig.serial_hi = v >> 16;
+    if (cfg.serial != v) { cfg.serial = v; cfg.Save(); }
   }
   void Bind() {
     if (card::BindApps(cardimg, Serial())) { card::Save(CardPath(), cardimg); m.LoadCard(cardimg); }
@@ -679,7 +693,7 @@ struct App {
     ImGui::PopFont();
     ImGui::SameLine(0, 14);
     ImGui::PushStyleColor(ImGuiCol_Text, ColV(TEXT3));
-    ImGui::Text("on this PC · %d of 15 blocks used", 15 - card::FreeBlocks(cardimg));
+    ImGui::Text("on this PC · %d of 15 blocks used · unit serial %08X", 15 - card::FreeBlocks(cardimg), Serial());
     ImGui::PopStyleColor();
     ImGui::Dummy(ImVec2(0, 10));
 
