@@ -40,7 +40,7 @@ namespace fs = std::filesystem;
 using ps::u8;
 
 static const char* APP_NAME = "MC/PS MemCard Pro";
-static const char* APP_VERSION = "0.1.3";
+static const char* APP_VERSION = "0.1.4";
 
 // Colours from the app mockup.
 static ImU32 Col(unsigned rgb, int a = 255) { return IM_COL32((rgb >> 16) & 255, (rgb >> 8) & 255, rgb & 255, a); }
@@ -262,6 +262,7 @@ struct App {
     if (!m.LoadState(std::vector<u8>(d.begin() + 20, d.end()))) return false;
     m.LoadCard(cardimg);
     AdvanceClock((long long)time(nullptr) - wall);
+    Rescan();   // the card file may have changed while the app was closed
     return true;
   }
 
@@ -284,6 +285,19 @@ struct App {
       if (r.complete || r.rx.size() > 1) break;
       m.RunFor(0.0167);
     }
+    if (!was) m.SetDocked(false);
+  }
+
+  // After the card changes from this side (a file dropped, a card loaded), the unit has to be
+  // told, as a console does: the J110 kernel lists the games on the card only at power-on and
+  // after it has been docked. So it gets a brief dock with a harmless ID command (53h).
+  void Rescan() {
+    if (!have_bios) return;
+    bool was = docked;
+    m.SetDocked(true);
+    m.RunFor(0.2);
+    m.CardCommand({0x81, 0x53, 0, 0, 0, 0, 0, 0, 0, 0});
+    m.RunFor(0.3);
     if (!was) m.SetDocked(false);
   }
 
@@ -314,6 +328,7 @@ struct App {
       cardimg = img;
       card::Save(CardPath(), cardimg);
       m.LoadCard(cardimg);
+      Rescan();
       Note("Card loaded from " + fs::path(path).filename().string() + " (the previous card is in " + fs::path(CardPath()).filename().string() + ".bak)");
       return;
     }
@@ -324,6 +339,7 @@ struct App {
     cardimg = img;
     card::Save(CardPath(), cardimg);
     m.LoadCard(cardimg);
+    Rescan();
     Note("Added " + fs::path(path).filename().string() + " to the card");
   }
 
@@ -773,6 +789,10 @@ static void Style() {
 int main(int argc, char** argv) {
   std::string shot, bios_arg, card_arg;
   int shot_frames = 120, shot_page = 0;
+  std::vector<std::string> drops;
+  bool keep_state = false;
+  struct ScriptPress { int frame, mask, frames; };
+  std::vector<ScriptPress> presses;
   for (int i = 1; i < argc; i++) {
     std::string a = argv[i];
     if (a == "--screenshot" && i + 1 < argc) shot = argv[++i];
@@ -780,6 +800,12 @@ int main(int argc, char** argv) {
     else if (a == "--page" && i + 1 < argc) shot_page = atoi(argv[++i]);
     else if (a == "--bios" && i + 1 < argc) bios_arg = argv[++i];
     else if (a == "--card" && i + 1 < argc) card_arg = argv[++i];
+    else if (a == "--keep-state") keep_state = true;
+    else if (a == "--drop" && i + 1 < argc) drops.push_back(argv[++i]);
+    else if (a == "--press" && i + 1 < argc) {   // FRAME:MASK:FRAMES, for headless checks
+      int f = 0, mk = 0, n = 0;
+      if (sscanf(argv[++i], "%d:%d:%d", &f, &mk, &n) == 3) presses.push_back({f, mk, n});
+    }
   }
 
   if (SDL_Init(SDL_INIT_VIDEO | SDL_INIT_AUDIO | SDL_INIT_GAMECONTROLLER | SDL_INIT_TIMER) != 0) {
@@ -830,6 +856,7 @@ int main(int argc, char** argv) {
   }
   if (!bios.empty()) app.UseBios(bios);
   app.page = shot_page;
+  for (auto& d : drops) app.Open(d);
 
   SDL_AudioSpec want{}, got{};
   want.freq = 32768;
@@ -863,7 +890,11 @@ int main(int argc, char** argv) {
     auto t = std::chrono::steady_clock::now();
     double dt = std::chrono::duration<double>(t - last).count();
     last = t;
-    if (!shot.empty()) dt = 1.0 / 60;   // screenshots run on a fixed clock
+    if (!shot.empty()) {
+      dt = 1.0 / 60;   // screenshots run on a fixed clock
+      app.mouse_buttons = 0;
+      for (auto& p : presses) if (frame >= p.frame && frame < p.frame + p.frames) app.mouse_buttons |= (u8)p.mask;
+    }
     app.Step(dt, SDL_GetKeyboardState(nullptr));
 
     ImGui_ImplSDLRenderer2_NewFrame();
@@ -888,7 +919,7 @@ int main(int argc, char** argv) {
   }
 
   if (app.card_save_at >= 0) card::Save(app.CardPath(), app.cardimg);
-  if (shot.empty()) app.SaveState();
+  if (shot.empty() || keep_state) app.SaveState();
   app.server.Close();
   ImGui_ImplSDLRenderer2_Shutdown();
   ImGui_ImplSDL2_Shutdown();
