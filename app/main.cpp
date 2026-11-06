@@ -182,6 +182,29 @@ struct App {
   void PowerOn() {
     m.LoadCard(cardimg);
     m.Reset();
+    clock_sync_at = now + 1.0;   // once the kernel has finished starting up
+  }
+
+  // Sets the PocketStation's clock from the PC, the way a PS1 game does: docked, BU command 5Ch
+  // function 00h. The kernel's start-up overwrites the RTC, so this runs a second after power-on.
+  double clock_sync_at = -1;
+  static u8 Bcd(int v) { return (u8)((v / 10) << 4 | (v % 10)); }
+  void SyncClock() {
+    time_t tt = time(nullptr);
+    tm lt = *localtime(&tt);
+    bool was = docked;
+    m.SetDocked(true);
+    m.RunFor(0.2);
+    std::vector<u8> tx = {0x81, 0x5C, 0x00, 0x00, 0x00,
+                          Bcd(lt.tm_mday), Bcd(lt.tm_mon + 1), Bcd(lt.tm_year % 100), Bcd(19 + lt.tm_year / 100),
+                          Bcd(lt.tm_sec), Bcd(lt.tm_min), Bcd(lt.tm_hour), Bcd(lt.tm_wday + 1), 0x00};
+    for (int i = 0; i < 10; i++) {
+      auto r = m.CardCommand(tx);
+      m.RunFor(0.02);
+      if (r.complete || r.rx.size() > 1) break;
+      m.RunFor(0.0167);
+    }
+    if (!was) m.SetDocked(false);
   }
 
   void LoadCardFile() {
@@ -253,6 +276,7 @@ struct App {
     if (!have_bios) return;
     m.SetButtons(Buttons(keys));
     if (docked && now >= undock_at) { docked = false; m.SetDocked(false); }
+    if (clock_sync_at >= 0 && now >= clock_sync_at) { clock_sync_at = -1; SyncClock(); }
     m.RunFor(std::min(dt, 0.1));
     if (m.CardDirty()) { cardimg = m.Card(); card_save_at = now + 1.0; }
     if (card_save_at >= 0 && now >= card_save_at) { card::Save(CardPath(), cardimg); card_save_at = -1; }
@@ -358,7 +382,7 @@ struct App {
     ImGui::Dummy(ImVec2(0, 6));
     ImGui::PushStyleColor(ImGuiCol_Text, ColV(TEXT4));
     ImGui::PushTextWrapPos(ImGui::GetCursorPosX() + 260);
-    ImGui::TextUnformatted(games ? "Start a game from the PocketStation's own menu: Enter on the clock, then pick it."
+    ImGui::TextUnformatted(games ? "On the clock, Left / Right shows the games on the card; Fire starts the one shown. Hold Fire in a game for its menu."
                                  : "No mini-games on this card yet. Drop a .mcs or .gme on this window, or load them from the Cards page.");
     ImGui::PopTextWrapPos();
     ImGui::PopStyleColor();
