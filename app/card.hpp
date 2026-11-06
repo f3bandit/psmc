@@ -31,6 +31,9 @@ std::string Load(const std::string& path, std::vector<u8>& into);
 std::string LoadRaw(const std::string& path, std::vector<u8>& into);   // without FixAppNames
 // Gives PocketStation apps saved under a hyphenated name the 'P' the kernel looks for.
 int FixAppNames(std::vector<u8>& card);
+// Writes the unit's serial into apps that bind themselves to one PocketStation (see card.cpp),
+// where it is still unset, as the PS1 game's install does. Returns how many were bound.
+int BindApps(std::vector<u8>& card, uint32_t serial);
 bool Save(const std::string& path, const std::vector<u8>& card);
 // One file as a single-save .mcs (directory frame + its blocks).
 std::vector<u8> ExportSave(const std::vector<u8>& card, int first_block);

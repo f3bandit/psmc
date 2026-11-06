@@ -403,8 +403,13 @@ u32 PocketStation::MemctlRead(u32 off, bool side_effects) {
     case 0x008: return mem.active;
     case 0x00C: return mem.boot_wait;
     case 0x010: return (mem.fdc & 0x7B) | (flash.Busy() ? 0 : 4);
+#ifdef PS_TRACE_SERIAL
+    case 0x300: if (side_effects) fprintf(stderr, "[serial] lo read pc=%08x lr=%08x\n", cpu->state.r15, cpu->state.r14); return sig.serial_lo;
+    case 0x302: if (side_effects) fprintf(stderr, "[serial] hi read pc=%08x\n", cpu->state.r15); return sig.serial_hi;
+#else
     case 0x300: return sig.serial_lo;
     case 0x302: return sig.serial_hi;
+#endif
     case 0x308: return sig.cal;
     case 0x304: case 0x306: case 0x30A: case 0x30C: case 0x30E: return 0xFFFF;
     default: return 0;

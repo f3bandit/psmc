@@ -154,6 +154,42 @@ int FixAppNames(std::vector<u8>& c) {
   return fixed;
 }
 
+// Apps that are tied to one PocketStation. When the PS1 game installs one, it reads the unit's
+// serial number (BU command 5Ah) and writes it into the app's file; on launch the app compares it
+// with the unit's own (kernel SWI 0Ah) and, on a mismatch, marks itself a copy and wipes its data.
+// A copy taken off the disc carries 0 there, so it is given this unit's serial here, as the
+// game's install would.
+struct BoundApp { const char* product; size_t serial_off; };
+static const BoundApp BOUND_APPS[] = {
+  {"BISLPMP86247", 0x7F0C},   // Metal Gear Solid Integral: MGS∫[FOXDIE]
+};
+
+int BindApps(std::vector<u8>& c, uint32_t serial) {
+  int bound = 0;
+  for (int b = 1; b < 16; b++) {
+    const u8* d = &c[b * 128];
+    if (d[0] != 0x51) continue;
+    for (auto& a : BOUND_APPS) {
+      if (memcmp(d + 0x0A, a.product, strlen(a.product)) != 0) continue;
+      // Offsets are within the file, which may span several blocks.
+      size_t blk = a.serial_off / 8192, off = a.serial_off % 8192;
+      int cur = b;
+      for (size_t i = 0; i < blk && cur >= 1 && cur < 16; i++) {
+        int next = c[cur * 128 + 8] | c[cur * 128 + 9] << 8;
+        cur = next == 0xFFFF ? -1 : next + 1;
+      }
+      if (cur < 1 || cur >= 16) continue;
+      u8* p = &c[cur * 8192 + off];
+      uint32_t have;
+      memcpy(&have, p, 4);
+      if (have != 0) continue;   // already installed on a unit
+      memcpy(p, &serial, 4);
+      bound++;
+    }
+  }
+  return bound;
+}
+
 std::string Load(const std::string& path, std::vector<u8>& into) {
   std::string err = LoadRaw(path, into);
   if (err.empty()) FixAppNames(into);

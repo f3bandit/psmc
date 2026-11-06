@@ -16,6 +16,7 @@
 #include <ctime>
 #include <filesystem>
 #include <map>
+#include <random>
 #include <string>
 #include <vector>
 
@@ -40,7 +41,7 @@ namespace fs = std::filesystem;
 using ps::u8;
 
 static const char* APP_NAME = "MC/PS MemCard Pro";
-static const char* APP_VERSION = "0.1.4";
+static const char* APP_VERSION = "0.1.5";
 
 // Colours from the app mockup.
 static ImU32 Col(unsigned rgb, int a = 255) { return IM_COL32((rgb >> 16) & 255, (rgb >> 8) & 255, rgb & 255, a); }
@@ -181,9 +182,27 @@ struct App {
     return true;
   }
 
+  // A real unit has a serial number from the factory. A new virtual one gets its own, kept in
+  // the saved state from then on.
+  u32 Serial() const { return (u32)m.sig.serial_hi << 16 | m.sig.serial_lo; }
+  void GiveSerial() {
+    if (Serial() != 0xFFFFFFFFu && Serial() != 0) return;
+    std::random_device rd;
+    u32 v = 0;
+    while (v == 0 || v == 0xFFFFFFFFu) v = rd() ^ (u32)time(nullptr);
+    m.sig.serial_lo = v & 0xFFFF;
+    m.sig.serial_hi = v >> 16;
+  }
+  void Bind() {
+    if (card::BindApps(cardimg, Serial())) { card::Save(CardPath(), cardimg); m.LoadCard(cardimg); }
+  }
+
   void PowerOn() {
     m.LoadCard(cardimg);
-    if (RestoreState()) return;
+    if (RestoreState()) { GiveSerial(); Bind(); return; }
+    GiveSerial();
+    Bind();
+    m.LoadCard(cardimg);
     m.Reset();
     clock_sync_at = now + 1.0;   // once the kernel has finished starting up
   }
@@ -326,6 +345,7 @@ struct App {
       if (!err.empty()) { Note(err); return; }
       card::Save(CardPath() + ".bak", cardimg);
       cardimg = img;
+      card::BindApps(cardimg, Serial());
       card::Save(CardPath(), cardimg);
       m.LoadCard(cardimg);
       Rescan();
@@ -337,6 +357,7 @@ struct App {
     std::string err = card::Load(path, img);
     if (!err.empty()) { Note(fs::path(path).filename().string() + ": " + err); return; }
     cardimg = img;
+    card::BindApps(cardimg, Serial());
     card::Save(CardPath(), cardimg);
     m.LoadCard(cardimg);
     Rescan();
