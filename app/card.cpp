@@ -145,6 +145,20 @@ std::string Load(const std::string& path, std::vector<u8>& into) {
     into = d;
     return "";
   }
+  // PS3 export of a PS1 save (.psv): "\0VSP" header, file name at 0x64, data size at 0x40 and
+  // data offset at 0x44. The directory frame is rebuilt from the name.
+  if (d.size() > 0x84 && memcmp(d.data(), "\0VSP", 4) == 0) {
+    uint32_t size, off;
+    memcpy(&size, &d[0x40], 4);
+    memcpy(&off, &d[0x44], 4);
+    if (size == 0 || size % 8192 || (size_t)off + size > d.size()) return "unsupported .psv (PS2 save?)";
+    u8 frame[128] = {};
+    frame[0] = 0x51;
+    memcpy(frame + 4, &size, 4);
+    frame[8] = frame[9] = 0xFF;
+    memcpy(frame + 0x0A, &d[0x64], 20);
+    return Place(into, frame, d.data() + off, size);
+  }
   // A single save: 128-byte directory frame (first block, 0x51) then its blocks.
   if (d.size() > 128 && (d.size() - 128) % 8192 == 0 && d[0] == 0x51)
     return Place(into, d.data(), d.data() + 128, d.size() - 128);

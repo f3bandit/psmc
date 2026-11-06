@@ -383,7 +383,7 @@ struct App {
     ImGui::PushStyleColor(ImGuiCol_Text, ColV(TEXT4));
     ImGui::PushTextWrapPos(ImGui::GetCursorPosX() + 260);
     ImGui::TextUnformatted(games ? "On the clock, Left / Right shows the games on the card; Fire starts the one shown. Hold Fire in a game for its menu."
-                                 : "No mini-games on this card yet. Drop a .mcs or .gme on this window, or load them from the Cards page.");
+                                 : "No mini-games on this card yet. Drop a .mcs, .psv or .gme on this window, or load them from the Cards page.");
     ImGui::PopTextWrapPos();
     ImGui::PopStyleColor();
     ImGui::EndGroup();
@@ -518,11 +518,11 @@ struct App {
     ListCard(fs::path(CardPath()).filename().string().c_str(), sub, nullptr, true, 280);
     ImGui::Dummy(ImVec2(0, 8));
     if (ImGui::Button("Load a card...", ImVec2(280, 34))) {
-      std::string f = OpenFileDialog("Memory cards and saves", "*.mcd;*.mcr;*.mc;*.srm;*.gme;*.mcs;*.psx;*.ps1");
+      std::string f = OpenFileDialog("Memory cards and saves", "*.mcd;*.mcr;*.mc;*.srm;*.gme;*.mcs;*.psv;*.psx;*.ps1");
       if (!f.empty()) Open(f);
     }
     if (ImGui::Button("Add a save or mini-game...", ImVec2(280, 34))) {
-      std::string f = OpenFileDialog("Single saves", "*.mcs;*.psx;*.ps1");
+      std::string f = OpenFileDialog("Single saves", "*.mcs;*.psv;*.psx;*.ps1");
       if (!f.empty()) Open(f);
     }
     if (ImGui::Button("Save the card as...", ImVec2(280, 34))) {

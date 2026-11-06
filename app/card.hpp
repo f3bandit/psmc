@@ -25,7 +25,7 @@ std::vector<Entry> List(const std::vector<u8>& card);
 int FreeBlocks(const std::vector<u8>& card);
 
 // Loads a card image from any of the usual formats: raw (.mcr .mcd .mc .srm .ps), DexDrive (.gme,
-// 3904-byte header) or a single save (.mcs / .psx / .ps1: 128-byte directory frame + data),
+// 3904-byte header), a PS3 export (.psv) or a single save (.mcs / .psx / .ps1: 128-byte directory frame + data),
 // which is placed on `into`. Returns an error message, empty on success.
 std::string Load(const std::string& path, std::vector<u8>& into);
 bool Save(const std::string& path, const std::vector<u8>& card);
