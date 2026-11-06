@@ -143,7 +143,10 @@ void PocketStation::Advance(int n) {
       tmr.presc[c] -= lim;
       if (tmr.value[c] == 0) {
         tmr.value[c] = tmr.load[c];
-        intc.latch |= 1 << (c == 2 ? INT_TC2 : INT_TC0 + c);
+        // A reload of 0 is how apps park a timer: MGS Integral's sound player leaves timer 2
+        // running with reload 0 at the end of every tune, which taken literally is an FIQ
+        // every two clocks and the app never runs again. A timer parked at 0 doesn't expire.
+        if (tmr.load[c] != 0) intc.latch |= 1 << (c == 2 ? INT_TC2 : INT_TC0 + c);
       } else {
         tmr.value[c]--;
       }
@@ -602,12 +605,18 @@ void PocketStation::DevWrite(u32 addr, u32 v, u8 be) {
         switch ((addr >> 2) & 3) {
           case 0:
             tmr.load[ch] = v & 0xFFFF;
+#ifdef PS_TRACE_TIMER
+            if (ch == 2) fprintf(stderr, "[tmr2] load %04x pc=%08x lr=%08x t=%.3f\n", v & 0xFFFF, cpu->state.r15, cpu->state.r14, Now());
+#endif
             if (!tmr.en[ch]) { tmr.value[ch] = v & 0xFFFF; tmr.presc[ch] = 0; }
             break;
           case 2:
             if ((v & 4) && !tmr.en[ch]) tmr.presc[ch] = 0;
             tmr.div[ch] = v & 3;
             tmr.en[ch] = (v >> 2) & 1;
+#ifdef PS_TRACE_TIMER
+            if (ch == 2) fprintf(stderr, "[tmr2] ctrl %x pc=%08x t=%.3f\n", v & 7, cpu->state.r15, Now());
+#endif
             break;
         }
       }

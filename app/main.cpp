@@ -40,7 +40,7 @@ namespace fs = std::filesystem;
 using ps::u8;
 
 static const char* APP_NAME = "MC/PS MemCard Pro";
-static const char* APP_VERSION = "0.1.6";
+static const char* APP_VERSION = "0.1.7";
 
 // Colours from the app mockup.
 static ImU32 Col(unsigned rgb, int a = 255) { return IM_COL32((rgb >> 16) & 255, (rgb >> 8) & 255, rgb & 255, a); }
@@ -68,6 +68,7 @@ struct Settings {
   std::string bios, card;
   int port = 7550;
   unsigned serial = 0;           // this unit's serial number, also kept in the saved state
+  bool unlock = true;            // move apps locked to another unit over to this one
   std::string path;
 
   void Load(const std::string& p) {
@@ -84,6 +85,7 @@ struct Settings {
       if (k == "bios") bios = v;
       else if (k == "card") card = v;
       else if (k == "port") port = atoi(v.c_str());
+      else if (k == "unlock") unlock = atoi(v.c_str()) != 0;
       else if (k == "serial") serial = (unsigned)strtoul(v.c_str(), nullptr, 16);
     }
     fclose(f);
@@ -93,6 +95,7 @@ struct Settings {
     if (!f) return;
     fprintf(f, "bios=%s\ncard=%s\nport=%d\n", bios.c_str(), card.c_str(), port);
     if (serial) fprintf(f, "serial=%08X\n", serial);
+    fprintf(f, "unlock=%d\n", unlock ? 1 : 0);
     fclose(f);
   }
 };
@@ -208,7 +211,7 @@ struct App {
     if (cfg.serial != v) { cfg.serial = v; cfg.Save(); }
   }
   void Bind() {
-    if (card::BindApps(cardimg, Serial())) { card::Save(CardPath(), cardimg); m.LoadCard(cardimg); }
+    if (cfg.unlock && card::BindApps(cardimg, Serial())) { card::Save(CardPath(), cardimg); m.LoadCard(cardimg); }
   }
 
   void PowerOn() {
@@ -359,7 +362,7 @@ struct App {
       if (!err.empty()) { Note(err); return; }
       card::Save(CardPath() + ".bak", cardimg);
       cardimg = img;
-      card::BindApps(cardimg, Serial());
+      if (cfg.unlock) card::BindApps(cardimg, Serial());
       card::Save(CardPath(), cardimg);
       m.LoadCard(cardimg);
       Rescan();
@@ -371,7 +374,7 @@ struct App {
     std::string err = card::Load(path, img);
     if (!err.empty()) { Note(fs::path(path).filename().string() + ": " + err); return; }
     cardimg = img;
-    card::BindApps(cardimg, Serial());
+    if (cfg.unlock) card::BindApps(cardimg, Serial());
     card::Save(CardPath(), cardimg);
     m.LoadCard(cardimg);
     Rescan();
@@ -695,6 +698,17 @@ struct App {
     ImGui::PushStyleColor(ImGuiCol_Text, ColV(TEXT3));
     ImGui::Text("on this PC · %d of 15 blocks used · unit serial %08X", 15 - card::FreeBlocks(cardimg), Serial());
     ImGui::PopStyleColor();
+    // Copy protection: some apps (MGS Integral's) only run on the PocketStation the game
+    // installed them on. With this on, such an app is moved over to this unit when it arrives.
+    ImGui::SameLine(0, 18);
+    if (ImGui::Checkbox("Unlock apps from other PocketStations", &cfg.unlock)) {
+      cfg.Save();
+      if (cfg.unlock) Bind();
+    }
+    if (ImGui::IsItemHovered())
+      ImGui::SetTooltip("Some games lock their PocketStation app to one unit's serial number;\n"
+                        "a copy from another unit marks itself a copy and wipes its data.\n"
+                        "On: such apps are moved to this unit when added. Off: the real check.");
     ImGui::Dummy(ImVec2(0, 10));
 
     auto entries = card::List(cardimg);
