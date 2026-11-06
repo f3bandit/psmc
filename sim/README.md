@@ -29,7 +29,16 @@ The open BIOS doesn't answer the card bus (out of scope upstream), so card tests
 
 Retail BIOS dumps stay out of the repo; users supply their own.
 
-Speed: ~1.6 M cycles/s, about 20× slower than real time.
+Speed: `ps_sim` (32 MHz system clock, as on MiSTer) runs about 20× slower than real time. `make ps_sim_8m` builds with an 8 MHz system clock (244 × the crystal, the CPU's top rate) and runs about 6× slower, with the same card-test results.
+
+## Virtual PocketStation on the network
+
+```
+./ps_sim_8m --bios J110.bin --serve 7550
+../tools/ps_probe.py --tcp 127.0.0.1:7550 --bios dump.bin
+```
+
+`--serve` runs the unit docked and takes whole commands over TCP (`card_raw HEX`, `press`, `lcd`, `status`, `dock`; replies match Phosphor's API). A console gives a card about 100 µs to ack each byte, so bytes can't cross the network one at a time: each command goes through the emulated card bus here, at console timing.
 
 ## Next
 

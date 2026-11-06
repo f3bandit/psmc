@@ -29,7 +29,11 @@
 // real unit is what settles it.
 
 module ps_spi #(
+`ifdef PS_CLK_SYS_HZ
+	parameter longint unsigned CLK_SYS_HZ = 64'd`PS_CLK_SYS_HZ,
+`else
 	parameter longint unsigned CLK_SYS_HZ = 64'd31_981_568,
+`endif
 	parameter int ACK_US = 3
 ) (
 	input  wire        clk_sys,

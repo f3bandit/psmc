@@ -23,3 +23,10 @@ clean:
 ps_sim_trace: $(SRCS) sim_main.cpp
 	verilator $(VFLAGS) -DPS_TRACE -Mdir obj_trace $(SRCS) sim_main.cpp -o ps_sim_trace
 	cp obj_trace/ps_sim_trace .
+
+# 8 MHz system clock (244 x the crystal): the CPU's top rate, 4x fewer cycles to simulate.
+# For the PC app; the MiSTer build keeps 32 MHz.
+ps_sim_8m: $(SRCS) sim_main.cpp
+	rm -rf obj_8m
+	verilator $(VFLAGS) -DPS_CLK_SYS_HZ=7995392 -CFLAGS -DPS_CLK_SYS_HZ=7995392 -Mdir obj_8m $(SRCS) sim_main.cpp -o ps_sim_8m
+	cp obj_8m/ps_sim_8m .

@@ -46,7 +46,11 @@ module ps_sim_top (
 
 	wire ce_sys, ce_xtal, clock_locked;
 
-	ps_clocks clocks (
+`ifndef PS_CLK_SYS_HZ
+`define PS_CLK_SYS_HZ 31981568
+`endif
+
+	ps_clocks #(.CLK_SYS_HZ(64'd`PS_CLK_SYS_HZ)) clocks (
 		.clk_sys  (clk_sys),
 		.reset    (reset),
 		.freq_sel (freq_sel),

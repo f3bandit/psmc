@@ -16,6 +16,7 @@
 //   --dump-card FILE    write the flash contents to FILE at the end
 //   --cmd-gap MS        idle time after each command (default 1 ms)
 //   --probe T           at T seconds run the PocketStation probes tools/ps_probe.py runs
+//   --serve PORT        run as a virtual PocketStation on TCP PORT (docked; see serve_line)
 //
 // Bus timing mirrors ps_snac_link.sv / ps_snac_card.sv from the PocketStation core
 // (Jamie Blanks, GPL-2.0-or-later): 250 kHz, LSB first, clock idles high, ack
@@ -30,11 +31,20 @@
 #include <cstring>
 #include <string>
 #include <vector>
+#include <cerrno>
 #include <sys/stat.h>
+#include <sys/socket.h>
+#include <netinet/in.h>
+#include <poll.h>
+#include <unistd.h>
+#include <fcntl.h>
 
-static const double CLK_HZ = 31981568.0;
-static const int US = 32;            // clk_sys cycles per microsecond (rounded up, as the core does)
-static const int HALF_BIT = 63;      // CLK_HZ / (250 kHz * 2)
+#ifndef PS_CLK_SYS_HZ
+#define PS_CLK_SYS_HZ 31981568
+#endif
+static const double CLK_HZ = PS_CLK_SYS_HZ;
+static const int US = (PS_CLK_SYS_HZ + 999999) / 1000000;   // clk_sys cycles per microsecond, rounded up as the core does
+static const int HALF_BIT = PS_CLK_SYS_HZ / 500000;          // half of a 250 kHz bit
 
 struct Press { int bit; double t, dur; };
 
@@ -85,7 +95,7 @@ static void ascii(uint8_t px[32][32]) {
 
 // One clk_sys cycle plus everything that watches the unit.
 static void step() {
-    if (start) {
+    if (start && (cyc & 63) == 0) {
         double t = now();
         uint8_t b = 0;
         for (auto& p : presses) if (t >= p.t && t < p.t + p.dur) b |= 1 << p.bit;
@@ -93,7 +103,7 @@ static void step() {
     }
     tick();
     dirty_pulses += top->card_dirty;
-    if (!start) return;
+    if (!start || (cyc & 63)) return;
     if (top->led_on != led || top->freq_sel != fsel || top->standby != stby || top->speaker_active != spk) {
         led = top->led_on; fsel = top->freq_sel; stby = top->standby; spk = top->speaker_active;
         printf("t=%8.4fs led=%d freq_sel=%d standby=%d speaker=%d\n", now(), led, fsel, stby, spk);
@@ -261,6 +271,101 @@ static void format_card(std::vector<uint8_t>& c) {
     c[63 * 128] = 'M'; c[63 * 128 + 1] = 'C'; c[63 * 128 + 127] = 'M' ^ 'C';
 }
 
+// ------------------------------------------------------------------ serve --
+// The virtual PocketStation on the network. A console can't wait on a network round trip for each
+// byte (it gives a card about 100 us to ack), so whole commands come in and go through the card
+// bus here at console timing. Line protocol, same replies as Phosphor's API:
+//   card_raw HEX      {"ok":true,"count":N,"stop":"none"|"no card"|"no ack","data":"<hex>"}
+//   press BTN MS      enter|right|left|down|up held for MS milliseconds
+//   lcd               {"ok":true,"w":32,"h":32,"levels":"<1024 hex digits, 0 light .. f dark>"}
+//   status            {"ok":true,"t":seconds,"led":0|1,"freq":N,"standby":0|1,"docked":0|1}
+//   dock 0|1          console power on the connector
+static int srv_fd = -1, cli_fd = -1;
+static std::string cli_in;
+
+static void cli_send(const std::string& line) {
+    if (cli_fd < 0) return;
+    std::string l = line + "\n";
+    if (send(cli_fd, l.data(), l.size(), MSG_NOSIGNAL) != (ssize_t)l.size()) { close(cli_fd); cli_fd = -1; }
+}
+
+static std::string hex(const std::vector<uint8_t>& v) {
+    static const char* h = "0123456789abcdef";
+    std::string o;
+    for (uint8_t b : v) { o += h[b >> 4]; o += h[b & 15]; }
+    return o;
+}
+
+static void serve_line(const std::string& line) {
+    char out[256];
+    if (line.rfind("card_raw ", 0) == 0) {
+        std::string hx = line.substr(9);
+        while (!hx.empty() && (hx.back() == '\r' || hx.back() == ' ')) hx.pop_back();
+        if (hx.empty() || hx.size() % 2 || hx.size() > 512) { cli_send("{\"ok\":false,\"error\":\"data is 1..256 bytes of hex\"}"); return; }
+        std::vector<uint8_t> tx;
+        for (size_t i = 0; i < hx.size(); i += 2) tx.push_back((uint8_t)strtoul(hx.substr(i, 2).c_str(), nullptr, 16));
+        bool ok;
+        auto rx = frame_once(tx, 0, (int)tx.size(), 6, false, &ok);
+        const char* stop = ok ? "none" : (rx.size() <= 1 ? "no card" : "no ack");
+        cli_send("{\"ok\":true,\"count\":" + std::to_string(rx.size()) + ",\"stop\":\"" + stop + "\",\"data\":\"" + hex(rx) + "\"}");
+    } else if (line.rfind("press ", 0) == 0) {
+        const char* names[5] = {"enter", "right", "left", "down", "up"};
+        char nm[16] = ""; int ms = 150;
+        sscanf(line.c_str() + 6, "%15s %d", nm, &ms);
+        int bit = -1;
+        for (int b = 0; b < 5; b++) if (!strcmp(nm, names[b])) bit = b;
+        if (bit < 0) { cli_send("{\"ok\":false,\"error\":\"button is enter|right|left|down|up\"}"); return; }
+        presses.push_back({bit, now(), ms / 1000.0});
+        cli_send("{\"ok\":true}");
+    } else if (line == "lcd") {
+        uint8_t px[32][32];
+        read_panel(px);
+        std::string o = "{\"ok\":true,\"w\":32,\"h\":32,\"levels\":\"";
+        for (int y = 0; y < 32; y++) for (int x = 0; x < 32; x++) o += "0123456789abcdef"[px[y][x] & 15];
+        cli_send(o + "\"}");
+    } else if (line == "status") {
+        snprintf(out, sizeof out, "{\"ok\":true,\"t\":%.3f,\"led\":%d,\"freq\":%d,\"standby\":%d,\"docked\":%d}",
+                 now(), top->led_on, top->freq_sel, top->standby, top->com_vcc);
+        cli_send(out);
+    } else if (line == "dock 0" || line == "dock 1") {
+        top->com_vcc = line[5] == '1';
+        cli_send("{\"ok\":true}");
+    } else {
+        cli_send("{\"ok\":false,\"error\":\"unknown command\"}");
+    }
+}
+
+static void serve_poll() {
+    if (srv_fd < 0) return;
+    if (cli_fd < 0) {
+        int c = accept(srv_fd, nullptr, nullptr);
+        if (c >= 0) { fcntl(c, F_SETFL, O_NONBLOCK); cli_fd = c; cli_in.clear(); printf("[serve] client connected\n"); }
+        return;
+    }
+    char buf[2048];
+    ssize_t n = recv(cli_fd, buf, sizeof buf, 0);
+    if (n == 0 || (n < 0 && errno != EAGAIN && errno != EWOULDBLOCK)) { close(cli_fd); cli_fd = -1; printf("[serve] client gone\n"); return; }
+    if (n > 0) cli_in.append(buf, n);
+    size_t nl;
+    while ((nl = cli_in.find('\n')) != std::string::npos) {
+        std::string line = cli_in.substr(0, nl);
+        cli_in.erase(0, nl + 1);
+        serve_line(line);
+    }
+}
+
+static bool serve_open(int port) {
+    srv_fd = socket(AF_INET, SOCK_STREAM, 0);
+    int one = 1;
+    setsockopt(srv_fd, SOL_SOCKET, SO_REUSEADDR, &one, sizeof one);
+    sockaddr_in a{};
+    a.sin_family = AF_INET; a.sin_port = htons(port); a.sin_addr.s_addr = htonl(INADDR_ANY);
+    if (bind(srv_fd, (sockaddr*)&a, sizeof a) || listen(srv_fd, 1)) { perror("serve"); return false; }
+    fcntl(srv_fd, F_SETFL, O_NONBLOCK);
+    printf("[serve] virtual PocketStation on port %d\n", port);
+    return true;
+}
+
 // The PocketStation probes tools/ps_probe.py runs on real hardware, for side-by-side comparison.
 static void raw_show(const char* name, const std::vector<uint8_t>& tx) {
     bool ok;
@@ -330,6 +435,7 @@ int main(int argc, char** argv) {
     std::string bios = "../../PocketStation_MiSTer/BIOS/enhanced_bios.bin";
     std::string card_file, dump_file;
     double seconds = 3.0, dock_t = -1, test_t = -1, probe_t = -1;
+    int serve_port = 0;
     const char* names[5] = {"enter", "right", "left", "down", "up"};
 
     for (int i = 1; i < argc; i++) {
@@ -345,6 +451,7 @@ int main(int argc, char** argv) {
         else if (a == "--dump-card") dump_file = next();
         else if (a == "--cmd-gap") cmd_gap_ms = atof(next().c_str());
         else if (a == "--probe") probe_t = atof(next().c_str());
+        else if (a == "--serve") serve_port = atoi(next().c_str());
         else if (a == "--press") {
             std::string p = next();
             size_t at = p.find('@');
@@ -403,6 +510,11 @@ int main(int argc, char** argv) {
     start = cyc;
 
     int rc = 0;
+    if (serve_port) {
+        if (!serve_open(serve_port)) return 1;
+        top->com_vcc = 1;            // docked: the virtual unit sits in a console
+        if (seconds == 3.0) seconds = 1e9;
+    }
     bool docked = false, tested = false, probed = false;
     uint64_t end = start + (uint64_t)(seconds * CLK_HZ);
     while (cyc < end) {
@@ -415,6 +527,7 @@ int main(int argc, char** argv) {
             rc = card_test(card) ? 1 : 0;
         }
         if (!probed && probe_t >= 0 && now() >= probe_t) { probed = true; probe(); }
+        if (serve_port && (cyc & 0x3FFF) == 0) serve_poll();   // about every 0.5 ms of unit time
         step();
     }
 

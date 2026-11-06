@@ -4,17 +4,26 @@
 #
 # Read-only: ID, 58h version, 5Ah status, 5Bh FUNC 00h (date/time) and 5Bh FUNC 01h (memory
 # read, used here for the BIOS at 04000000h). Nothing is written to the unit.
-# Usage: ps_probe.py [port] [--bios FILE]   (port 1 or 2, default 1)
+# Usage: ps_probe.py [port] [--bios FILE] [--tcp HOST:PORT]
+#   port 1 or 2 (default 1): the SS1 front port, through Phosphor's API socket
+#   --tcp: a virtual PocketStation (sim/ps_sim --serve, the Windows app) instead; it speaks the
+#          same card_raw line, so the probe is identical (the port number is ignored)
 import json, socket, sys
 
 SOCK = '/tmp/phosphor-main.sock'
 
 
 class Phosphor:
-    def __init__(self):
-        self.s = socket.socket(socket.AF_UNIX)
-        self.s.connect(SOCK)
-        self.s.settimeout(5)
+    def __init__(self, tcp=None):
+        if tcp:
+            host, port = tcp.rsplit(':', 1)
+            self.s = socket.create_connection((host, int(port)))
+            self.s.settimeout(120)       # the sim runs slower than real time
+        else:
+            self.s = socket.socket(socket.AF_UNIX)
+            self.s.connect(SOCK)
+            self.s.settimeout(5)
+        self.tcp = tcp
         self.buf = b''
 
     def cmd(self, line):
@@ -27,7 +36,7 @@ class Phosphor:
     def raw(self, port, data, tries=10):
         hexs = bytes(data).hex()
         for _ in range(tries):
-            r = self.cmd('card_raw %d %s' % (port, hexs))
+            r = self.cmd(('card_raw %s' % hexs) if self.tcp else ('card_raw %d %s' % (port, hexs)))
             if not r.get('ok'):
                 raise RuntimeError(r.get('error'))
             if r['stop'] != 'no card':       # FFh / no ack on the first byte: busy, try again
@@ -44,15 +53,20 @@ def show(name, sent, got, stop):
 
 def main():
     port = 1
-    bios_out = None
+    bios_out = tcp = None
     args = sys.argv[1:]
     if args and args[0] in ('1', '2'):
         port = int(args.pop(0))
-    if args[:1] == ['--bios'] and len(args) > 1:
-        bios_out = args[1]
+    while args:
+        a = args.pop(0)
+        if a == '--bios' and args: bios_out = args.pop(0)
+        elif a == '--tcp' and args: tcp = args.pop(0)
+        else:
+            print(__doc__ or 'usage: ps_probe.py [1|2] [--bios FILE] [--tcp HOST:PORT]'); return 2
 
-    p = Phosphor()
-    print('ports on:', p.cmd('ports on'))
+    p = Phosphor(tcp)
+    if not tcp:
+        print('ports on:', p.cmd('ports on'))
 
     probes = [
         ('53h ID', [0x81, 0x53] + [0] * 8),
