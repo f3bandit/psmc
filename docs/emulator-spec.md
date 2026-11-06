@@ -108,3 +108,15 @@ Static control (reset `2`) and dynamic control registers; with no partner the re
 ## Card port (`0x0C000000`)
 
 Our `rtl/ps_spi.sv`, see `card-port.md`. In the emulator the console side runs in-process from whole commands (`card_raw`), the same as the network server.
+
+## Checked against the HDL core (J110)
+
+| Check | Result |
+|---|---|
+| Boot, 5 s | identical screen; clock drop to 500 kHz at 3.4922 s (HDL 3.4931 s) |
+| Card test (ID, read 0/1, write 63, read-back, flash) | identical, flag 08h → 00h after the write, one busy retry |
+| Probes 53h, 58h, 5Bh FUNC 00h/01h (BIOS read) | byte-identical |
+| 5Ah serial (F_SN) | emulator `FF FF FF FF`, HDL `FF FF 00 00`: see below |
+| Speed | 13× real time on the build VM (HDL sim: 0.2×) |
+
+The serial difference: the kernel reads the two serial halfwords at `0x06000300`/`0x06000302` with 16-bit loads, which Jamie's comments say is what real hardware needs. His bus hands device registers back in the low half of the word only, so a halfword load at an address with bit 1 set reads 0 there. The emulator returns the addressed half, as the hardware he describes does. Probably worth reporting upstream; it only shows in the serial number (5Ah, and the MGS Integral serial check).

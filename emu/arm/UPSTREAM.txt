@@ -1,0 +1,2 @@
+55b5cf0ae3d929582ac5bfd486558173502b8354 2026-06-21 14:22:19 +0200
+Copied from https://github.com/nba-emu/NanoBoyAdvance src/nba/src/arm (GPL-3.0-or-later). Changes for the PocketStation are marked 'PocketStation:'.

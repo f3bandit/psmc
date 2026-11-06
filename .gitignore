@@ -10,3 +10,5 @@ sim/obj_8m/
 sim/obj_win/
 sim/ps_sim_8m
 sim/*.exe
+emu/ps_emu
+emu/*.exe
