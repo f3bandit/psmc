@@ -12,3 +12,6 @@ sim/ps_sim_8m
 sim/*.exe
 emu/ps_emu
 emu/*.exe
+app/mcps
+app/*.exe
+app/*_preview.png
