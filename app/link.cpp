@@ -507,6 +507,7 @@ void Link::Log(const std::string& line) {
   snprintf(pre, sizeof pre, "%s  t%-6u %6.2fs  ", ts, tick_, pair_us_ / 1e6);
   std::string l = pre + line;
   log.push_back(l);
+  if (tap) tap("link: " + l);
   if (log.size() > 300) log.erase(log.begin(), log.begin() + 100);
   if (!log_path.empty()) {
     if (FILE* f = fopen(log_path.c_str(), "ab")) { fprintf(f, "%s\n", l.c_str()); fclose(f); }
@@ -596,6 +597,8 @@ void Link::Start(ps::PocketStation& own, const std::vector<uint8_t>& bios) {
 }
 
 // A unit with its infrared in use: transmitter or receiver switched on.
+int64_t g_slice_us = 100;   // TEST knob
+
 bool IrOn(const ps::PocketStation& u) {
   return ((u.irda_static & 1) && !(u.irda_static & 2)) || u.IrListening();
 }
@@ -610,7 +613,7 @@ static uint64_t UsToTicks(int64_t us) {
 void RunPair(ps::PocketStation& a, ps::PocketStation& b, uint64_t base_a, uint64_t base_b, int64_t& pair_us, int64_t until_us) {
   while (pair_us < until_us) {
     bool ir = IrOn(a) || IrOn(b);
-    int64_t s = ir ? std::min<int64_t>(100, until_us - pair_us) : until_us - pair_us;
+    int64_t s = ir ? std::min<int64_t>(g_slice_us, until_us - pair_us) : until_us - pair_us;
     bool la = a.IrSending(), lb = b.IrSending();
     a.ir_light = lb;
     b.ir_light = la;
@@ -628,7 +631,7 @@ void Link::StepPair(ps::PocketStation& a, ps::PocketStation& b, int64_t until_us
   // its infrared on, in 100 us slices (a bit is about 2 ms); otherwise a whole tick at once.
   while (pair_us_ < until_us) {
     bool ir = IrOn(a) || IrOn(b);
-    int64_t next = ir ? std::min<int64_t>(pair_us_ + 100, until_us) : until_us;
+    int64_t next = ir ? std::min<int64_t>(pair_us_ + g_slice_us, until_us) : until_us;
     RunPair(a, b, base_a_, base_b_, pair_us_, next);
     if (ir || IrOn(a) || IrOn(b)) {
       if (!ir_session_) {

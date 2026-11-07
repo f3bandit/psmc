@@ -3,7 +3,7 @@
 # Windows build:               make win SDL2=/path/to/SDL2-2.30.9/x86_64-w64-mingw32
 #   (SDL2 MinGW devel package: https://github.com/libsdl-org/SDL/releases)
 IMGUI := third_party/imgui
-SRCS := main.cpp card.cpp net.cpp alerts.cpp link.cpp ../emu/pocketstation.cpp ../emu/arm/tablegen/tablegen.cc \
+SRCS := main.cpp card.cpp net.cpp alerts.cpp link.cpp monitor.cpp ../emu/pocketstation.cpp ../emu/arm/tablegen/tablegen.cc \
         $(IMGUI)/imgui.cpp $(IMGUI)/imgui_draw.cpp $(IMGUI)/imgui_tables.cpp $(IMGUI)/imgui_widgets.cpp \
         $(IMGUI)/backends/imgui_impl_sdl2.cpp $(IMGUI)/backends/imgui_impl_sdlrenderer2.cpp
 FLAGS := -std=c++17 -O2 -I. -I../emu -I$(IMGUI) -I$(IMGUI)/backends

@@ -55,6 +55,7 @@ static void Screens(PocketStation& a, PocketStation& b, const std::string& why, 
 int main(int argc, char** argv) {
   if (argc < 3) { fprintf(stderr, "link_replay BIOS FILE.mcpslink [SECONDS...]\n"); return 1; }
   auto bios = ReadAll(argv[1]);
+  if (getenv("SLICE_US")) irlink::g_slice_us = atoi(getenv("SLICE_US"));
   auto f = ReadAll(argv[2]);
   size_t pos = 0;
   auto get32 = [&]() { uint32_t v = 0; if (pos + 4 <= f.size()) memcpy(&v, &f[pos], 4); pos += 4; return v; };

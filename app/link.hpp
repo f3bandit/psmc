@@ -17,6 +17,7 @@
 
 #include <cstdint>
 #include <cstdio>
+#include <functional>
 #include <memory>
 #include <string>
 #include <vector>
@@ -36,6 +37,7 @@ struct Found {
 // tools/link_replay both run units with this, so a replay is the same to the cycle.
 void RunPair(ps::PocketStation& a, ps::PocketStation& b, uint64_t base_a, uint64_t base_b, int64_t& pair_us, int64_t until_us);
 bool IrOn(const ps::PocketStation& u);
+extern int64_t g_slice_us;
 constexpr uint32_t REPLAY_MAGIC = 0x4C53434D;   // "MCSL"
 
 class Link {
@@ -76,6 +78,7 @@ class Link {
   // `log_path` set every line is also appended to that file.
   std::vector<std::string> log;
   std::string log_path;
+  std::function<void(const std::string&)> tap;   // every line, as it's written (the phone's monitor)
   // The replay: with `replay_dir` set, each link is saved there as link-YYYYMMDD-HHMMSS.mcpslink:
   // both units and cards as they started, then every press of either, by tick. The link is exact,
   // so tools/link_replay runs it again cycle for cycle (screens, infrared, everything).

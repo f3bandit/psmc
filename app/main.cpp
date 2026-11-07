@@ -28,6 +28,7 @@
 #include "alerts.hpp"
 #include "card.hpp"
 #include "link.hpp"
+#include "monitor.hpp"
 #ifndef _WIN32
 #include <unistd.h>   // gethostname
 #endif
@@ -120,7 +121,7 @@ namespace fs = std::filesystem;
 using ps::u8;
 
 static const char* APP_NAME = "MC/PS MemCard Pro";
-static const char* APP_VERSION = "0.1.24";
+static const char* APP_VERSION = "0.1.25";
 #ifdef __ANDROID__
 #define ON_THIS_DEVICE "on this phone"
 #define ON_THIS_DEVICE_CAPS "ON THIS PHONE"
@@ -264,7 +265,7 @@ struct App {
   ImFont* font_bold = nullptr;
   ImFont* font_big = nullptr;
 
-  void Note(const std::string& s) { note = s; note_until = now + 5; }
+  void Note(const std::string& s) { note = s; note_until = now + 5; if (serving) mon.Log("note: " + s); }
 
   // Writes `data` where the person chooses: a save dialog on Windows, Android's "save to" picker
   // (from a copy in the app's cache) on a phone.
@@ -426,6 +427,119 @@ struct App {
   double relisten_at = 0;
   size_t link_log_seen = 0;         // the Link panel was last drawn then: look for units meanwhile
   bool multicast = false;
+
+  // --- watching a phone from the PC (see monitor.hpp) ------------------------------------------
+  // The phone logs what it does and serves it; the PC reads every phone it finds into
+  // remote/<name>/ beside its card, and passes on requests dropped there.
+  bool serving = false;              // this is the phone
+  bool watching = false;             // this is the PC
+  monitor::Server mon;
+  monitor::Client watch;
+  std::map<std::string, std::string> known_units;   // ip -> name, every unit seen
+  int last_held = -1;
+  double status_at = 0;
+  int steps_since = 0;
+  u8 remote_mask = 0;                // a press asked for from the PC
+  double remote_until = -1;
+
+  static std::string Hex(const std::vector<u8>& v, size_t n) {
+    std::string o;
+    char b[4];
+    for (size_t i = 0; i < std::min(n, v.size()); i++) { snprintf(b, sizeof b, "%02x", v[i]); o += b; }
+    return o;
+  }
+
+  std::string ScreenText() {
+    u8 f[32][32];
+    m.Frame(f);
+    std::string o;
+    for (int y = 0; y < 32; y++) { for (int x = 0; x < 32; x++) o += f[y][x] ? '#' : '.'; o += '\n'; }
+    return o;
+  }
+
+  std::string StatusLine() {
+    static const char* st[] = {"off", "waiting", "connecting", "starting", "running"};
+    char b[512];
+    snprintf(b, sizeof b,
+             "status: %s%s kernel=%d pc=%08x t=%llu ir static=%x dyn=%x listen=%d light=%d steps/s=%d docked=%d bg=%d "
+             "link=%s%s tick=%u peer=%s",
+             InGame() ? "in game" : "kernel screens", have_bios ? "" : " (no BIOS)", KernelScreen() ? 1 : 0,
+             have_bios ? m.cpu->state.r15 : 0, (unsigned long long)m.t, m.irda_static, m.irda_dynamic,
+             m.IrListening() ? 1 : 0, m.IrSending() ? 1 : 0, steps_since, docked ? 1 : 0, background ? 1 : 0,
+             st[lnk.state], lnk.stalled ? " (stalled)" : "", lnk.Tick(), lnk.peer_name.c_str());
+    return b;
+  }
+
+  // A request from the PC.
+  void Command(const std::string& c) {
+    mon.Log("request: " + c);
+    char word[32] = {}, arg[200] = {};
+    sscanf(c.c_str(), "%31s %199[^\n]", word, arg);
+    std::string w = word;
+    if (w == "snapshot" || w == "screen") {
+      mon.SendFile("screen.txt", [&] { auto t = ScreenText(); return std::vector<u8>(t.begin(), t.end()); }());
+      if (w == "snapshot") {
+        mon.SendFile("unit.state", m.SaveState());
+        mon.SendFile("card.mcd", cardimg);
+        if (lnk.peer) mon.SendFile("peer.state", lnk.peer->SaveState());
+        mon.Log("sent screen.txt, unit.state, card.mcd" + std::string(lnk.peer ? ", peer.state" : ""));
+      }
+    } else if (w == "list") {
+      std::error_code ec;
+      for (auto& e : fs::directory_iterator(dir, ec))
+        if (e.is_regular_file()) mon.Log("file: " + e.path().filename().string() + " " + std::to_string(e.file_size()));
+    } else if (w == "send") {
+      std::string n = fs::path(arg).filename().string();
+      auto d = ReadFile(dir + n);
+      if (d.empty()) mon.Log("no file " + n);
+      else { mon.SendFile(n, d); mon.Log("sent " + n); }
+    } else if (w == "links") {   // the link log, and the newest replay with any dumps of it
+      std::error_code ec;
+      std::string newest;
+      for (auto& e : fs::directory_iterator(dir, ec)) {
+        std::string n = e.path().filename().string();
+        if (n.rfind("link-", 0) == 0 && n.size() > 9 && n.substr(n.size() - 9) == ".mcpslink" && n > newest) newest = n;
+      }
+      std::vector<std::string> names = {"link.log"};
+      if (!newest.empty()) {
+        names.push_back(newest);
+        std::string base = newest.substr(0, newest.size() - 9);
+        names.push_back(base + "-ours.state");
+        names.push_back(base + "-theirs.state");
+      }
+      for (auto& n : names) { auto d = ReadFile(dir + n); if (!d.empty()) { mon.SendFile(n, d); mon.Log("sent " + n); } }
+    } else if (w == "press") {   // press MASK SECONDS (MASK as on the unit: 1 Enter, 2 Right, 4 Left, 8 Down, 16 Up)
+      int mask = 0;
+      double secs = 0.15;
+      sscanf(arg, "%i %lf", &mask, &secs);
+      remote_mask = (u8)mask;
+      remote_until = now + secs;
+    } else if (w == "exit") {
+      if (InGameNow()) mon.Log(ExitGame() ? "exited the game" : "couldn't exit the game");
+    } else {
+      mon.Log("requests: snapshot, screen, list, send NAME, links, press MASK SECONDS, exit");
+    }
+  }
+
+  void Monitor(u8 held) {
+    if (serving) {
+      steps_since++;
+      if ((int)held != last_held) {
+        char b[64];
+        snprintf(b, sizeof b, "buttons %02x%s", held, remote_until > now ? " (from the PC)" : "");
+        mon.Log(b);
+        last_held = held;
+      }
+      if (now >= status_at) { status_at = now + 1; mon.Log(StatusLine()); steps_since = 0; }
+      for (auto& c : mon.Poll()) Command(c);
+    } else if (watching) {
+      // Units are found by the link's own search (its broadcasts and sweep), kept on while not linked.
+      if (!lnk.Linking()) lnk.Discover(now);
+      for (auto& f : lnk.found) known_units[f.ip] = f.name;
+      if (lnk.Linking() && !lnk.peer_ip.empty()) known_units[lnk.peer_ip] = lnk.peer_name.empty() ? lnk.peer_ip : lnk.peer_name;
+      watch.Poll(now, known_units, dir);
+    }
+  }
   // Anything that changes the unit other than the link itself (a reset, another card, the clock,
   // the console) would make the two sides' copies differ: it ends the link first.
   // A link that ends this way (Exit game, Reset, another card) is taken up again by itself: the
@@ -789,8 +903,10 @@ struct App {
 
   void Step(double dt, const u8* keys, double cap = 0.1) {
     now += dt;
-    if (!have_bios) return;
     u8 held = Buttons(keys);
+    if (remote_until > now) held |= remote_mask;
+    Monitor(held);
+    if (!have_bios) return;
     m.SetButtons(held);
     if (docked && now >= undock_at && !lnk.Running()) { docked = false; m.SetDocked(false); }
     if (clock_sync_at >= 0 && now >= clock_sync_at && lnk.state < irlink::Link::STARTING) { clock_sync_at = -1; SyncClock(); }
@@ -813,7 +929,7 @@ struct App {
       Undock();
       lnk.Join(relink_ip, irlink::PORT, link_name);
     }
-    if (link_panel_at >= 0 && now - link_panel_at > 0.5) { lnk.StopDiscovery(); link_panel_at = -1; SetMulticast(false); }
+    if (link_panel_at >= 0 && now - link_panel_at > 0.5 && !watching) { lnk.StopDiscovery(); link_panel_at = -1; SetMulticast(false); }
     TrackHome();
     if (state_save_at < 0) state_save_at = now + 30;
     if (now >= state_save_at) { SaveState(); state_save_at = now + 30; }
@@ -1727,6 +1843,17 @@ int main(int argc, char** argv) {
     gethostname(n, sizeof n - 1);
     app.link_name = n[0] ? n : "PC";
 #endif
+  }
+#ifdef __ANDROID__
+  app.serving = true;
+#else
+  app.serving = getenv("MCPS_MONITOR_SERVE") != nullptr;   // (tests: a PC acting as the phone)
+  app.watching = !app.serving && !getenv("MCPS_MONITOR_OFF");
+#endif
+  if (app.serving) {
+    app.mon.Start(app.link_name);
+    app.mon.Log(std::string("MC/PS MemCard Pro ") + APP_VERSION + " on " + app.link_name);
+    app.lnk.tap = [&app](const std::string& l) { app.mon.Log(l); };
   }
   if (!card_arg.empty()) app.cfg.card = card_arg;
   app.LoadCardFile();
