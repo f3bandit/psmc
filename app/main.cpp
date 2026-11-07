@@ -20,6 +20,7 @@
 #include <vector>
 
 #include "imgui.h"
+#include "imgui_internal.h"   // ClearActiveID: a drag that turns into a scroll isn't a tap
 #include "imgui_impl_sdl2.h"
 #include "imgui_impl_sdlrenderer2.h"
 
@@ -94,7 +95,7 @@ namespace fs = std::filesystem;
 using ps::u8;
 
 static const char* APP_NAME = "MC/PS MemCard Pro";
-static const char* APP_VERSION = "0.1.13";
+static const char* APP_VERSION = "0.1.14";
 #ifdef __ANDROID__
 #define ON_THIS_DEVICE "on this phone"
 #define ON_THIS_DEVICE_CAPS "ON THIS PHONE"
@@ -712,8 +713,7 @@ struct App {
     auto* dl = ImGui::GetWindowDrawList();
     ImVec2 p = ImGui::GetCursorScreenPos();
     float h = sub2 ? 70 : 52;
-    ImGui::InvisibleButton(title, ImVec2(w, h));
-    bool clicked = ImGui::IsItemClicked();
+    bool clicked = ImGui::InvisibleButton(title, ImVec2(w, h));   // on release, so a scroll isn't a tap
     bool hov = ImGui::IsItemHovered();
     dl->AddRectFilled(p, ImVec2(p.x + w, p.y + h), Col(sel ? ACCENT_BG : (hov ? CARD : PANEL)), 10);
     if (sel) dl->AddRect(p, ImVec2(p.x + w, p.y + h), Col(ACCENT), 10);
@@ -727,11 +727,46 @@ struct App {
   // A phone held upright: the window is taller than wide.
   bool Portrait() const { ImVec2 d = ImGui::GetIO().DisplaySize; return d.y > d.x; }
 
-  // Touch scrolling for a child window: a drag that didn't start on a widget scrolls it.
+  // Touch scrolling for the page (call inside its child window, after its contents), as a phone
+  // list scrolls: a finger that moves more than a few dp drags the page, wherever it went down,
+  // even on a button (which then isn't pressed); let go while moving and it carries on and slows.
+  struct TouchScroller {
+    bool down = false, dragging = false;
+    float start_y = 0, velocity = 0;
+    ImGuiID window = 0;
+  } touch;
   void DragScroll() {
     ImGuiIO& io = ImGui::GetIO();
-    if (ImGui::IsWindowHovered(ImGuiHoveredFlags_ChildWindows) && ImGui::IsMouseDragging(0) && !ImGui::IsAnyItemActive())
-      ImGui::SetScrollY(ImGui::GetScrollY() - io.MouseDelta.y);
+    ImGuiID id = ImGui::GetCurrentWindow()->ID;
+    float dt = std::max(io.DeltaTime, 1.0f / 240);
+    if (ImGui::IsMouseClicked(0)) {
+      bool inside = ImGui::IsWindowHovered(ImGuiHoveredFlags_ChildWindows | ImGuiHoveredFlags_AllowWhenBlockedByActiveItem);
+      if (inside) touch = {true, false, io.MousePos.y, 0, id};
+      else if (touch.window == id) touch.velocity = 0;
+    }
+    if (touch.window != id) return;
+    if (touch.down && io.MouseDown[0]) {
+      if (!touch.dragging && std::fabs(io.MousePos.y - touch.start_y) > 8) {
+        touch.dragging = true;
+        ImGui::ClearActiveID();   // the button it started on lets go without a click
+      }
+      if (touch.dragging) {
+        ImGui::SetScrollY(ImGui::GetScrollY() - io.MouseDelta.y);
+        touch.velocity = touch.velocity * 0.6f + (-io.MouseDelta.y / dt) * 0.4f;
+      }
+    } else if (touch.down) {
+      touch.down = false;
+      if (!touch.dragging) touch.velocity = 0;
+      touch.dragging = false;
+    } else if (std::fabs(touch.velocity) > 30) {
+      // The fling: about as long as Android's.
+      float before = ImGui::GetScrollY();
+      ImGui::SetScrollY(before + touch.velocity * dt);
+      touch.velocity *= std::pow(0.04f, dt);
+      if (ImGui::GetScrollY() == before && (before <= 0 || before >= ImGui::GetScrollMaxY())) touch.velocity = 0;
+    } else {
+      touch.velocity = 0;
+    }
   }
 
   void PlayPage() {
@@ -1283,8 +1318,7 @@ struct App {
       ImVec2 p = ImGui::GetCursorScreenPos();
       auto it = owner.find(b);
       ImGui::PushID(b);
-      ImGui::InvisibleButton("blk", ImVec2(cw, 92));
-      if (ImGui::IsItemClicked() && it != owner.end()) selected = it->second->first_block;
+      if (ImGui::InvisibleButton("blk", ImVec2(cw, 92)) && it != owner.end()) selected = it->second->first_block;
       ImGui::PopID();
       ImVec2 q(p.x + cw, p.y + 92);
       if (it == owner.end()) {
@@ -1394,6 +1428,8 @@ int main(int argc, char** argv) {
   bool keep_state = false;
   struct ScriptPress { int frame, mask, frames; };
   std::vector<ScriptPress> presses;
+  struct ScriptDrag { int frame, x, y0, y1, frames; };   // a finger, for headless checks
+  std::vector<ScriptDrag> drags;
   for (int i = 1; i < argc; i++) {
     std::string a = argv[i];
     if (a == "--screenshot" && i + 1 < argc) shot = argv[++i];
@@ -1406,6 +1442,10 @@ int main(int argc, char** argv) {
     else if (a == "--press" && i + 1 < argc) {   // FRAME:MASK:FRAMES, for headless checks
       int f = 0, mk = 0, n = 0;
       if (sscanf(argv[++i], "%d:%d:%d", &f, &mk, &n) == 3) presses.push_back({f, mk, n});
+    }
+    else if (a == "--drag" && i + 1 < argc) {   // FRAME:X:Y0:Y1:FRAMES in dp, for headless checks
+      ScriptDrag d{};
+      if (sscanf(argv[++i], "%d:%d:%d:%d:%d", &d.frame, &d.x, &d.y0, &d.y1, &d.frames) == 5) drags.push_back(d);
     }
   }
 
@@ -1592,6 +1632,12 @@ int main(int argc, char** argv) {
 
     ImGui_ImplSDLRenderer2_NewFrame();
     ImGui_ImplSDL2_NewFrame();
+    for (auto& d : drags) {
+      if (frame < d.frame || frame > d.frame + d.frames) continue;
+      float t = (float)(frame - d.frame) / d.frames;
+      io.AddMousePosEvent((float)d.x, d.y0 + (d.y1 - d.y0) * t);
+      io.AddMouseButtonEvent(0, frame < d.frame + d.frames);
+    }
 #if defined(__ANDROID__) || defined(MCPS_PHONE_LAYOUT)
     {
       // In dp: the screen's pixels over its density, as Android lays apps out.
