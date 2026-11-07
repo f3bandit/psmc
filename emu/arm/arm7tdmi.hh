@@ -370,6 +370,15 @@ private:
 
   bool irq_line;
   bool fiq_line;   // PocketStation
+
+ public:
+  // PocketStation: for tracing which kernel calls an app makes (tools/kernel_trace). A SWI as it's
+  // taken (its number and where it came from), and every return from an exception (where to and
+  // r0). Null in the apps.
+  void (*swi_hook)(void* ctx, u32 number, u32 from) = nullptr;
+  void (*exret_hook)(void* ctx, u32 to, u32 r0) = nullptr;
+  void* hook_ctx = nullptr;
+
   bool latch_irq_disable;
 
   static std::array<bool, 256> s_condition_lut;

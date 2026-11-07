@@ -164,6 +164,12 @@ struct PocketStation {
   // whether it was lit, in that runner's microseconds. Not part of a saved state.
   int64_t ir_dark_us = -1000000;
   bool ir_was_lit = false;
+  // For tracing (tools/kernel_trace): every data access to kernel RAM (0..1FFh). Null in the apps.
+  void (*kram_hook)(void* ctx, u32 addr, int size, bool write, u32 value) = nullptr;
+  void* kram_ctx = nullptr;
+  // ...and the first code fetch from one address (an app's entrypoint).
+  u32 watch_fetch = 0xFFFFFFFF;
+  void (*fetch_hook)(void* ctx, u32 addr) = nullptr;
   bool IrSending() const { return (irda_static & 1) && !(irda_static & 2) && (irda_dynamic & 1); }
   bool IrListening() const { return !(irda_static & 1) && !(irda_static & 2); }
 

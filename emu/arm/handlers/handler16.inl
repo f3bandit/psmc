@@ -564,6 +564,7 @@ void Thumb_ConditionalBranch(u16 instruction) {
 }
 
 void Thumb_SWI(u16 instruction) {
+  if (swi_hook) swi_hook(hook_ctx, instruction & 0xFF, state.r15 - 4);
   // Save current program status register.
   state.spsr[BANK_SVC].v = state.cpsr.v;
 

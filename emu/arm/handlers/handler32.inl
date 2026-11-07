@@ -157,6 +157,7 @@ void ARM_DataProcessing(u32 instruction) {
 
       SwitchMode(spsr.f.mode);
       state.cpsr.v = spsr.v;
+      if (exret_hook) exret_hook(hook_ctx, state.r15, state.reg[0]);
     }
 
     if constexpr (opcode != DataOp::TST &&
@@ -646,6 +647,7 @@ void ARM_BlockDataTransfer(u32 instruction) {
         auto spsr = GetSPSR();
         SwitchMode(spsr.f.mode);
         state.cpsr.v = spsr.v;
+        if (exret_hook) exret_hook(hook_ctx, state.r15, state.reg[0]);
       }
 
       if (state.cpsr.f.thumb) {
@@ -676,6 +678,7 @@ void ARM_Undefined(u32 instruction) {
 }
 
 void ARM_SWI(u32 instruction) {
+  if (swi_hook) swi_hook(hook_ctx, instruction & 0xFFFFFF, state.r15 - 8);
   // Save current program status register.
   state.spsr[BANK_SVC].v = state.cpsr.v;
 

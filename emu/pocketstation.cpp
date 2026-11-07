@@ -780,6 +780,7 @@ static int Cost(PocketStation& m, Region r, bool thumb_fetch) {
 // size: 0 byte, 1 halfword, 2 word. Returns the aligned 32-bit word the access reads.
 static u32 Read(PocketStation& m, Bus& bus, u32 addr, int size, int access) {
   bool fetch = access & Bus::Code;
+  if (fetch && addr == m.watch_fetch && m.fetch_hook) { m.watch_fetch = 0xFFFFFFFF; m.fetch_hook(m.kram_ctx, addr); }
   Decoded d = Decode(m, addr);
   m.Advance(Cost(m, d.r, fetch && size == 1));
 
@@ -799,6 +800,7 @@ static u32 Read(PocketStation& m, Bus& bus, u32 addr, int size, int access) {
       u32 i = addr & 0x7FC;
       word = m.sram[i] | m.sram[i + 1] << 8 | m.sram[i + 2] << 16 | (u32)m.sram[i + 3] << 24;
       if (!fetch) m.ramdata_q = word;
+      if (m.kram_hook && !fetch && (addr & 0x7FF) < 0x200) m.kram_hook(m.kram_ctx, addr & 0x7FF, size, false, word);
       break;
     }
     case R_BOOT: {
@@ -847,6 +849,7 @@ static void Write(PocketStation& m, Bus& bus, u32 addr, int size, u32 value) {
       u32 i = addr & 0x7FC;
       for (int b = 0; b < 4; b++)
         if (be >> b & 1) m.sram[i + b] = lanes >> 8 * b;
+      if (m.kram_hook && (addr & 0x7FF) < 0x200) m.kram_hook(m.kram_ctx, addr & 0x7FF, size, true, value);
       break;
     }
     case R_FLASH: case R_VFLASH:
