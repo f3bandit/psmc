@@ -120,7 +120,7 @@ namespace fs = std::filesystem;
 using ps::u8;
 
 static const char* APP_NAME = "MC/PS MemCard Pro";
-static const char* APP_VERSION = "0.1.23";
+static const char* APP_VERSION = "0.1.24";
 #ifdef __ANDROID__
 #define ON_THIS_DEVICE "on this phone"
 #define ON_THIS_DEVICE_CAPS "ON THIS PHONE"
@@ -436,7 +436,7 @@ struct App {
       relink_until = now + 20;
       relink_next = now + 1.0;
     }
-    if (lnk.Busy()) lnk.Stop(why + "; linking again...");
+    if (lnk.Linking()) lnk.Stop(why + "; linking again...");   // just being visible isn't a link
     relisten_at = now;
     m.ir_light = false;
   }
@@ -457,6 +457,7 @@ struct App {
   }
 
   bool InGameNow() { in_game = KernelScreen() ? 0.0f : 1.0f; return in_game > 0.5f; }
+  double game_since = -1;
 
   // The J110 kernel's own screens (greeting, clock, browsing the card) keep their state at the
   // bottom of RAM; a game owns that RAM and the kernel clears it when it starts one. Where the CPU
@@ -465,7 +466,11 @@ struct App {
 
   void TrackHome() {
     bool app = !KernelScreen();
-    in_game = app ? 1.0f : 0.0f;
+    // The kernel touches that RAM for a frame every few seconds on its own screens: only count a
+    // game once it has held for half a second (Exit game would flicker otherwise).
+    if (!app) { in_game = 0.0f; game_since = -1; }
+    else if (game_since < 0) game_since = now;
+    else if (now - game_since >= 0.5) in_game = 1.0f;
     // A snapshot only becomes the one to go back to once the unit has stayed on the kernel's
     // screens for another second after it, so it can't be the instant a game was launched.
     if (app || docked || m.buttons) { kernel_since = -1; candidate.clear(); return; }
@@ -788,7 +793,7 @@ struct App {
     u8 held = Buttons(keys);
     m.SetButtons(held);
     if (docked && now >= undock_at && !lnk.Running()) { docked = false; m.SetDocked(false); }
-    if (clock_sync_at >= 0 && now >= clock_sync_at && !lnk.Busy()) { clock_sync_at = -1; SyncClock(); }
+    if (clock_sync_at >= 0 && now >= clock_sync_at && lnk.state < irlink::Link::STARTING) { clock_sync_at = -1; SyncClock(); }
     bool was_linked = lnk.Running();
     // Always visible to other units on the network, ready to take a link.
     if (lnk.state == irlink::Link::OFF && now >= relisten_at) { relisten_at = now + 5; lnk.Host(link_name); }
@@ -841,7 +846,7 @@ struct App {
 
   void StartServer() {
     server.card_raw = [this](const std::vector<unsigned char>& tx, bool& complete) {
-      if (lnk.Busy()) { complete = false; return std::vector<unsigned char>(); }   // linking: the card is away
+      if (lnk.state >= irlink::Link::STARTING) { complete = false; return std::vector<unsigned char>(); }   // linked: the card is away
       if (!docked) { docked = true; m.SetDocked(true); }
       undock_at = now + 3.0;   // back to games 3 s after the console stops talking
       auto r = m.CardCommand(tx);

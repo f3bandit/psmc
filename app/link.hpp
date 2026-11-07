@@ -66,7 +66,8 @@ class Link {
   // Runs both units in lockstep up to real time (`wall`, seconds), this unit's buttons `buttons`.
   void Advance(ps::PocketStation& own, uint8_t buttons, double wall);
   bool Running() const { return state == RUNNING; }
-  bool Busy() const { return state != OFF; }
+  bool Busy() const { return state != OFF; }               // anything going on, waiting included
+  bool Linking() const { return state >= CONNECTING; }    // a link being made, or running
   uint32_t Tick() const { return tick_; }   // 1/60 s steps run together so far
 
   // The monitor: what happened on the link, for both units (this side runs both): presses,
