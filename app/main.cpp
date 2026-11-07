@@ -40,7 +40,7 @@ namespace fs = std::filesystem;
 using ps::u8;
 
 static const char* APP_NAME = "MC/PS MemCard Pro";
-static const char* APP_VERSION = "0.1.9";
+static const char* APP_VERSION = "0.1.10";
 
 // Colours from the app mockup.
 static ImU32 Col(unsigned rgb, int a = 255) { return IM_COL32((rgb >> 16) & 255, (rgb >> 8) & 255, rgb & 255, a); }
@@ -69,6 +69,7 @@ struct Settings {
   int port = 7550;
   unsigned serial = 0;           // this unit's serial number, also kept in the saved state
   bool unlock = true;            // move apps locked to another unit over to this one
+  bool mute = false;
   std::string path;
 
   void Load(const std::string& p) {
@@ -86,6 +87,7 @@ struct Settings {
       else if (k == "card") card = v;
       else if (k == "port") port = atoi(v.c_str());
       else if (k == "unlock") unlock = atoi(v.c_str()) != 0;
+      else if (k == "mute") mute = atoi(v.c_str()) != 0;
       else if (k == "serial") serial = (unsigned)strtoul(v.c_str(), nullptr, 16);
     }
     fclose(f);
@@ -96,6 +98,7 @@ struct Settings {
     fprintf(f, "bios=%s\ncard=%s\nport=%d\n", bios.c_str(), card.c_str(), port);
     if (serial) fprintf(f, "serial=%08X\n", serial);
     fprintf(f, "unlock=%d\n", unlock ? 1 : 0);
+    fprintf(f, "mute=%d\n", mute ? 1 : 0);
     fclose(f);
   }
 };
@@ -307,6 +310,13 @@ struct App {
   long long home_wall = 0;
   std::string HomePath() const { return dir + "PocketStation.home"; }
   bool InGame() const { return in_game > 0.5f; }
+  void ToggleMute() {
+    cfg.mute = !cfg.mute;
+    cfg.Save();
+    if (audio && cfg.mute) SDL_ClearQueuedAudio(audio);
+    Note(cfg.mute ? "Sound muted" : "Sound on");
+  }
+
   bool InGameNow() { in_game = KernelScreen() ? 0.0f : 1.0f; return in_game > 0.5f; }
 
   // The J110 kernel's own screens (greeting, clock, browsing the card) keep their state at the
@@ -530,7 +540,7 @@ struct App {
       for (size_t i = 1; i < pending.size(); i++)
         if (pending[i] != pending[i - 1]) { speaker_until = now + 0.25; break; }
     }
-    if (audio) {
+    if (audio && !cfg.mute) {
       auto a = m.TakeAudio();
       if (SDL_GetQueuedAudioSize(audio) < 32768 * 2 / 6) {
         std::vector<int16_t> out(a.size());
@@ -665,8 +675,14 @@ struct App {
     dl->AddText(ImGui::GetFont(), 13 * s, ImVec2(x0 + 16 * s, y), Col(TEXT3), "LED");
     const char* ir = m.IrSending() ? "IR: sending" : m.IrListening() ? "IR: receiving" : "IR: off";
     dl->AddText(ImGui::GetFont(), 13 * s, ImVec2(x0 + 70 * s, y), (m.IrSending() || m.IrListening()) ? Col(ACCENT) : Col(TEXT3), ir);
+    // The speaker doubles as the mute switch (also M on the keyboard).
     bool spk = now < speaker_until;
-    dl->AddText(ImGui::GetFont(), 13 * s, ImVec2(x0 + 150 * s, y), Col(TEXT3), spk ? "Speaker on" : "Speaker off");
+    const char* spk_text = cfg.mute ? (spk ? "Muted (sound)" : "Muted") : (spk ? "Speaker on" : "Speaker off");
+    ImGui::SetCursorScreenPos(ImVec2(x0 + 146 * s, y - 4 * s));
+    if (ImGui::InvisibleButton("speaker", ImVec2(96 * s, 22 * s))) ToggleMute();
+    bool hov = ImGui::IsItemHovered();
+    if (hov) ImGui::SetTooltip(cfg.mute ? "Click to unmute (M)" : "Click to mute (M)");
+    dl->AddText(ImGui::GetFont(), 13 * s, ImVec2(x0 + 150 * s, y), cfg.mute ? Col(ACCENT) : hov ? Col(TEXT) : Col(TEXT3), spk_text);
     if (docked) dl->AddText(ImGui::GetFont(), 13 * s, ImVec2(x0 + 250 * s, y), Col(ACCENT), "Docked");
     ImGui::SetCursorScreenPos(ImVec2(x0 + iw - 70 * s, y - 5 * s));
     ImGui::PushStyleColor(ImGuiCol_Button, ImVec4(0, 0, 0, 0));
@@ -1053,6 +1069,7 @@ int main(int argc, char** argv) {
         app.pad = nullptr;
       }
       if (e.type == SDL_KEYDOWN && e.key.keysym.scancode == SDL_SCANCODE_F2 && app.have_bios) { app.m.LoadCard(app.cardimg); app.m.Reset(); }
+      if (e.type == SDL_KEYDOWN && e.key.keysym.scancode == SDL_SCANCODE_M && !ImGui::GetIO().WantTextInput) app.ToggleMute();
       if (((e.type == SDL_KEYDOWN && e.key.keysym.scancode == SDL_SCANCODE_F3) ||
            (e.type == SDL_CONTROLLERBUTTONDOWN && e.cbutton.button == SDL_CONTROLLER_BUTTON_START)) && app.have_bios && app.InGame())
         if (!app.ExitGame()) app.Note("No saved clock to go back to yet: press Reset to leave the game.");
