@@ -428,10 +428,20 @@ struct App {
   bool multicast = false;
   // Anything that changes the unit other than the link itself (a reset, another card, the clock,
   // the console) would make the two sides' copies differ: it ends the link first.
+  // A link that ends this way (Exit game, Reset, another card) is taken up again by itself: the
+  // same unit is linked again from where each one now is, the other side ready to take it.
   void EndLink(const std::string& why = "The link ended: the unit was reset or its card changed") {
-    if (lnk.Busy()) lnk.Stop(why);
+    if (lnk.Running()) {
+      relink_ip = lnk.peer_ip;
+      relink_until = now + 20;
+      relink_next = now + 1.0;
+    }
+    if (lnk.Busy()) lnk.Stop(why + "; linking again...");
+    relisten_at = now;
     m.ir_light = false;
   }
+  std::string relink_ip;
+  double relink_until = -1, relink_next = 0;
   double kernel_since = -1;
   std::vector<u8> home;              // the unit at the clock
   std::vector<u8> candidate;         // the next one, until a second later proves it
@@ -775,7 +785,17 @@ struct App {
     if (lnk.state == irlink::Link::STARTING) Undock();
     if (lnk.Running()) lnk.Advance(m, held, SDL_GetTicks64() / 1000.0);    // both units, in step
     else if (lnk.state != irlink::Link::STARTING) { m.ir_light = false; m.RunFor(std::min(dt, cap)); }
-    if (was_linked && !lnk.Running() && !lnk.ended.empty()) Note(lnk.ended);   // why it ended
+    if (was_linked && !lnk.Running()) {
+      if (!lnk.ended.empty()) Note(lnk.ended);   // why it ended
+      relisten_at = now;                          // ready at once for the other side to link again
+    }
+    if (lnk.Running()) relink_until = -1;
+    else if (relink_until > now && now >= relink_next && lnk.state != irlink::Link::CONNECTING &&
+             lnk.state != irlink::Link::STARTING && have_bios) {
+      relink_next = now + 2;
+      Undock();
+      lnk.Join(relink_ip, irlink::PORT, link_name);
+    }
     if (link_panel_at >= 0 && now - link_panel_at > 0.5) { lnk.StopDiscovery(); link_panel_at = -1; SetMulticast(false); }
     TrackHome();
     if (state_save_at < 0) state_save_at = now + 30;
