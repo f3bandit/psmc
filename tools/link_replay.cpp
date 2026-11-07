@@ -26,6 +26,12 @@ static std::vector<u8> ReadAll(const char* p) {
   return v;
 }
 
+static uint32_t Crc32(const u8* d, size_t n, uint32_t c = 0) {
+  c = ~c;
+  for (size_t i = 0; i < n; i++) { c ^= d[i]; for (int k = 0; k < 8; k++) c = (c >> 1) ^ (0xEDB88320u & (0u - (c & 1))); }
+  return ~c;
+}
+
 static void Screens(PocketStation& a, PocketStation& b, const std::string& why, uint32_t tick) {
   u8 fa[32][32], fb[32][32];
   a.Frame(fa);
@@ -86,6 +92,11 @@ int main(int argc, char** argv) {
     irlink::RunPair(a, b, base_a, base_b, us, (int64_t)(tick + 1) * 1000000 / 60);
     a.TakeAudio();
     b.TakeAudio();
+    if ((tick + 1) % 120 == 0) {   // the link's step check, same formula
+      uint32_t c = Crc32(a.sram.data(), a.sram.size());
+      c = Crc32(b.sram.data(), b.sram.size(), c);
+      printf("step check t%u: %08x\n", tick + 1, c);
+    }
     auto mode = [](PocketStation& u) { return ((u.irda_static & 1) && !(u.irda_static & 2)) ? 2 : u.IrListening() ? 1 : 0; };
     if (mode(a) != ma || mode(b) != mb) {
       static const char* nm[] = {"off", "receiving", "transmitting"};

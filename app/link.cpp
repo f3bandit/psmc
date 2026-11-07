@@ -34,8 +34,8 @@ namespace irlink {
 
 namespace {
 
-constexpr uint32_t VERSION = 1;
-enum : uint8_t { M_HELLO = 1, M_START = 2, M_INPUT = 3, M_CHECK = 4, M_BYE = 5, M_PING = 6, M_PONG = 7 };
+constexpr uint32_t VERSION = 2;   // 2: per-unit step checks every half second, dumps on a mismatch
+enum : uint8_t { M_HELLO = 1, M_START = 2, M_INPUT = 3, M_CHECK = 4, M_BYE = 5, M_PING = 6, M_PONG = 7, M_DUMP = 8 };
 const char* ADVERT = "MCPSLINK1";
 
 void StartSockets() {
@@ -478,8 +478,17 @@ void Link::Handle(uint8_t type, const std::vector<uint8_t>& p, ps::PocketStation
       if (p.size() == 5 && Get32(&p[0]) == theirs_.size()) theirs_.push_back(p[4]);
       break;
     case M_CHECK:
-      if (p.size() == 8) their_checks_.push_back({Get32(&p[0]), Get32(&p[4])});
+      if (p.size() == 12) their_checks_.push_back({Get32(&p[0]), Get32(&p[4]), Get32(&p[8])});
       break;
+    case M_DUMP: {
+      // The other side's two units at a check where we differ: kept beside the replay.
+      if (!dump_base_.empty()) {
+        if (FILE* f = fopen((dump_base_ + "-theirs.state").c_str(), "wb")) { fwrite(p.data(), 1, p.size(), f); fclose(f); }
+        Log("their units at the mismatch saved: " + dump_base_.substr(dump_base_.find_last_of("/\\") + 1) + "-theirs.state");
+      }
+      got_dump_ = true;
+      break;
+    }
     case M_BYE: {
       std::string why(p.begin(), p.end());
       connected_ = false;   // don't answer
@@ -547,6 +556,10 @@ void Link::Start(ps::PocketStation& own, const std::vector<uint8_t>& bios) {
   status = "Linked with " + peer_name;
   wa_ = IrWatch();
   wb_ = IrWatch();
+  mismatch_ = got_dump_ = false;
+  last_match_ = 0;
+  snaps_.clear();
+  dump_base_.clear();
   ir_session_ = false;
   stall_since_ = -1;
   auto crc = [](ps::PocketStation& u) { auto st = u.SaveState(); return Crc32(st.data(), st.size()); };
@@ -560,6 +573,7 @@ void Link::Start(ps::PocketStation& own, const std::vector<uint8_t>& bios) {
     time_t now = time(nullptr);
     strftime(fn, sizeof fn, "link-%Y%m%d-%H%M%S.mcpslink", localtime(&now));
     replay_ = fopen((replay_dir + fn).c_str(), "wb");
+    dump_base_ = replay_dir + std::string(fn).substr(0, strlen(fn) - 9);   // without .mcpslink
     if (replay_) {
       auto put = [&](const std::vector<uint8_t>& v) {
         uint32_t n = (uint32_t)v.size();
@@ -667,7 +681,7 @@ void Link::Advance(ps::PocketStation& own, uint8_t buttons, double wall) {
   double target = (wall - start_wall_) * 60;
   int n = 0;
   stalled = false;
-  while (tick_ < target && n < 8) {
+  while (tick_ < target && n < 8 && !mismatch_) {
     if (theirs_.size() <= tick_) { stalled = true; break; }
     uint8_t ba = host_ ? mine_[tick_] : theirs_[tick_], bb = host_ ? theirs_[tick_] : mine_[tick_];
     auto press = [&](IrWatch& w, uint8_t v, const std::string& who) {
@@ -690,13 +704,18 @@ void Link::Advance(ps::PocketStation& own, uint8_t buttons, double wall) {
     tick_++;
     StepPair(a, b, (int64_t)tick_ * 1000000 / 60);
     n++;
-    if (tick_ % 120 == 0) {
-      uint32_t c = Crc32(a.sram.data(), a.sram.size());
-      c = Crc32(b.sram.data(), b.sram.size(), c);
-      my_checks_.push_back({tick_, c});
+    if (tick_ % 30 == 0) {
+      // Step check every half second, one value per unit (its whole state), so a difference
+      // says which unit and when. The states are kept a while in case the other side differs.
+      auto sa = a.SaveState(), sb = b.SaveState();
+      uint32_t ca = Crc32(sa.data(), sa.size()), cb = Crc32(sb.data(), sb.size());
+      my_checks_.push_back({tick_, ca, cb});
+      snaps_.push_back({tick_, std::move(sa), std::move(sb)});
+      if (snaps_.size() > 40) snaps_.erase(snaps_.begin());
       std::vector<uint8_t> p;
       Put32(p, tick_);
-      Put32(p, c);
+      Put32(p, ca);
+      Put32(p, cb);
       Send(M_CHECK, p);
     }
   }
@@ -710,20 +729,43 @@ void Link::Advance(ps::PocketStation& own, uint8_t buttons, double wall) {
   if (target - tick_ > 30) start_wall_ += (target - tick_ - 30) / 60;
   peer->TakeAudio();
   // The two copies must match.
-  while (!my_checks_.empty() && !their_checks_.empty()) {
+  while (!my_checks_.empty() && !their_checks_.empty() && !mismatch_) {
     auto m = my_checks_.front(), t = their_checks_.front();
-    if (m.first < t.first) { my_checks_.erase(my_checks_.begin()); continue; }
-    if (t.first < m.first) { their_checks_.erase(their_checks_.begin()); continue; }
+    if (m.tick < t.tick) { my_checks_.erase(my_checks_.begin()); continue; }
+    if (t.tick < m.tick) { their_checks_.erase(their_checks_.begin()); continue; }
     my_checks_.erase(my_checks_.begin());
     their_checks_.erase(their_checks_.begin());
-    if (m.second != t.second) {
-      char l[128];
-      snprintf(l, sizeof l, "step check at t%u: ours %08x, %s's %08x: MISMATCH", m.first, m.second, peer_name.c_str(), t.second);
+    if (m.a != t.a || m.b != t.b) {
+      char l[200];
+      snprintf(l, sizeof l, "step check at t%u: A %08x vs %08x %s, B %08x vs %08x %s  (last match t%u)", m.tick, m.a, t.a,
+               m.a == t.a ? "ok" : "DIFFERS", m.b, t.b, m.b == t.b ? "ok" : "DIFFERS", last_match_);
       Log(l);
-      Stop("The two units got out of step; the link was ended (each keeps its own)");
-      return;
+      // Both units as they were at that check, ours to a file and to the other side, theirs back
+      // from them: the two versions to compare.
+      mismatch_ = true;
+      mismatch_wall_ = wall;
+      for (auto& sn : snaps_)
+        if (sn.tick == m.tick) {
+          std::vector<uint8_t> d;
+          Put32(d, sn.tick);
+          Put32(d, (uint32_t)sn.a.size());
+          d.insert(d.end(), sn.a.begin(), sn.a.end());
+          Put32(d, (uint32_t)sn.b.size());
+          d.insert(d.end(), sn.b.begin(), sn.b.end());
+          if (!dump_base_.empty()) {
+            dump_base_ += "-t" + std::to_string(sn.tick);
+            if (FILE* f = fopen((dump_base_ + "-ours.state").c_str(), "wb")) { fwrite(d.data(), 1, d.size(), f); fclose(f); }
+          }
+          Send(M_DUMP, d);
+        }
+      break;
     }
-    if (m.first % 1200 == 0) Log("step check t" + std::to_string(m.first) + ": both sides match");
+    last_match_ = m.tick;
+    if (m.tick % 1200 == 0) Log("step check t" + std::to_string(m.tick) + ": both sides match");
+  }
+  if (mismatch_ && (got_dump_ || wall - mismatch_wall_ > 3)) {
+    Stop("The two units got out of step; the link was ended (each keeps its own)");
+    return;
   }
   Flush();
 }

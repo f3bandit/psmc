@@ -130,7 +130,14 @@ class Link {
   int64_t pair_us_ = 0;          // emulated time since the start, microseconds
   uint64_t base_a_ = 0, base_b_ = 0;   // each unit's master tick at the start
   double start_wall_ = -1;
-  std::vector<std::pair<uint32_t, uint32_t>> my_checks_, their_checks_;
+  struct Check { uint32_t tick, a, b; };
+  std::vector<Check> my_checks_, their_checks_;
+  struct Snap { uint32_t tick; std::vector<uint8_t> a, b; };
+  std::vector<Snap> snaps_;
+  bool mismatch_ = false, got_dump_ = false;
+  double mismatch_wall_ = 0;
+  uint32_t last_match_ = 0;
+  std::string dump_base_;
 };
 
 }  // namespace irlink

@@ -132,10 +132,15 @@ int main(int argc, char** argv) {
     lb.Poll(wall, ub, bios);
     la.Advance(ua, ba, wall);
     lb.Advance(ub, bb, wall);
+    if (getenv("LINK_TEST_DESYNC") && t >= 10 && t < 10 + 1.0 / 60) ub.sram[0x7F0] ^= 1;   // a change outside the link
     stalls += la.stalled + lb.stalled;
     ua.TakeAudio();
     ub.TakeAudio();
-    if (!la.Running() || !lb.Running()) { printf("ended: A: %s | B: %s\n", la.status.c_str(), lb.status.c_str()); return 1; }
+    if (!la.Running() || !lb.Running()) {
+      printf("ended: A: %s | B: %s\n", la.status.c_str(), lb.status.c_str());
+      for (auto& l : la.log) printf("%s\n", l.c_str());
+      return 1;
+    }
     wall += 1.0 / 60;
   }
   // Each side's copy of the other's unit must be the other's unit, exactly.
