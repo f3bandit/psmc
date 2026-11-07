@@ -92,10 +92,9 @@ int main(int argc, char** argv) {
     irlink::RunPair(a, b, base_a, base_b, us, (int64_t)(tick + 1) * 1000000 / 60);
     a.TakeAudio();
     b.TakeAudio();
-    if ((tick + 1) % 120 == 0) {   // the link's step check, same formula
-      uint32_t c = Crc32(a.sram.data(), a.sram.size());
-      c = Crc32(b.sram.data(), b.sram.size(), c);
-      printf("step check t%u: %08x\n", tick + 1, c);
+    if ((tick + 1) % 30 == 0) {   // the link's step check, same formula: each unit's whole state
+      auto sa = a.SaveState(), sb = b.SaveState();
+      printf("step check t%u: A %08x B %08x\n", tick + 1, Crc32(sa.data(), sa.size()), Crc32(sb.data(), sb.size()));
     }
     auto mode = [](PocketStation& u) { return ((u.irda_static & 1) && !(u.irda_static & 2)) ? 2 : u.IrListening() ? 1 : 0; };
     if (mode(a) != ma || mode(b) != mb) {

@@ -36,7 +36,7 @@ void ARM_DataProcessing(u32 instruction) {
   pipe.access = Access::Code | Access::Sequential;
 
   if constexpr (immediate) {
-    int value = instruction & 0xFF;
+    u32 value = instruction & 0xFF;   // PocketStation: unsigned, so the rotate is defined
     int shift = ((instruction >> 8) & 0xF) * 2;
 
     if (shift != 0) {
@@ -190,10 +190,10 @@ void ARM_StatusTransfer(u32 instruction) {
 
     // Decode source operand.
     if (immediate) {
-      int value = instruction & 0xFF;
+      u32 value = instruction & 0xFF;   // PocketStation: unsigned, and no shift by 32
       int shift = ((instruction >> 8) & 0xF) * 2;
 
-      op = (value >> shift) | (value << (32 - shift));
+      op = shift ? (value >> shift) | (value << (32 - shift)) : value;
     } else {
       op = GetReg(instruction & 0xF);
     }

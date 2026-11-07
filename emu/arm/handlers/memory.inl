@@ -55,7 +55,8 @@ u32 ReadWordRotate(u32 address, int access) {
   auto value = bus.ReadWord(address, access);
   auto shift = (address & 3) * 8;
 
-  return (value >> shift) | (value << (32 - shift));
+  // PocketStation: a shift by 32 (aligned addresses) is undefined in C++; rotate only when needed.
+  return shift ? (value >> shift) | (value << (32 - shift)) : value;
 }
 
 void WriteByte(u32 address, u8  value, int access) {
