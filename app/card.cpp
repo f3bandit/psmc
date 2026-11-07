@@ -131,11 +131,26 @@ static std::string Place(std::vector<u8>& c, const u8* frame, const u8* data, si
   return "";
 }
 
+// Rubato v0.03 (K-Comm, 1999) lists the other apps on the card and skips itself; with none it
+// reads from before the start of flash and the unit faults. Let it list itself too, so the list
+// is never empty: one instruction (at 0x928 in its file, "beq skip" -> "mov r0, r0").
+static int PatchApps(std::vector<u8>& c) {
+  int patched = 0;
+  for (int b = 1; b < 16; b++) {
+    const u8* d = &c[b * 128];
+    if (d[0] != 0x51 || memcmp(d + 0x0A, "XXXXXXP-PKPAR", 13) != 0) continue;
+    u8* f = &c[b * 8192];
+    static const u8 skip[4] = {0x0E, 0x00, 0x00, 0x0A}, nop[4] = {0x00, 0x00, 0xA0, 0xE1};
+    if (memcmp(f, "SC", 2) == 0 && memcmp(f + 0x928, skip, 4) == 0) { memcpy(f + 0x928, nop, 4); patched++; }
+  }
+  return patched;
+}
+
 // A PocketStation executable's directory name has 'P' where a save has its hyphen
 // (BASLUSP00892..., not BASLUS-00892...): the kernel only lists files named that way as apps.
 // Saves copied by tools that "normalised" the name get it back here.
 int FixAppNames(std::vector<u8>& c) {
-  int fixed = 0;
+  int fixed = PatchApps(c);
   for (int b = 1; b < 16; b++) {
     u8* d = &c[b * 128];
     if (d[0] != 0x51 || d[0x10] != '-') continue;

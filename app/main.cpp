@@ -82,7 +82,7 @@ namespace fs = std::filesystem;
 using ps::u8;
 
 static const char* APP_NAME = "MC/PS MemCard Pro";
-static const char* APP_VERSION = "0.1.11";
+static const char* APP_VERSION = "0.1.12";
 #ifdef __ANDROID__
 #define ON_THIS_DEVICE "on this phone"
 #define ON_THIS_DEVICE_CAPS "ON THIS PHONE"
