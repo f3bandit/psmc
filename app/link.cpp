@@ -559,6 +559,7 @@ void Link::Start(ps::PocketStation& own, const std::vector<uint8_t>& bios) {
   mismatch_ = got_dump_ = false;
   last_match_ = 0;
   snaps_.clear();
+  own_hist_.clear();
   dump_base_.clear();
   ir_session_ = false;
   stall_since_ = -1;
@@ -704,6 +705,10 @@ void Link::Advance(ps::PocketStation& own, uint8_t buttons, double wall) {
     tick_++;
     StepPair(a, b, (int64_t)tick_ * 1000000 / 60);
     n++;
+    // This side's own unit after every tick, for the last second and a half: sent with a dump,
+    // so a replay can find the very tick where one side's own unit left the common path.
+    own_hist_.push_back({tick_, own.SaveState()});
+    if (own_hist_.size() > 90) own_hist_.erase(own_hist_.begin());
     if (tick_ % 30 == 0) {
       // Step check every half second, one value per unit (its whole state), so a difference
       // says which unit and when. The states are kept a while in case the other side differs.
@@ -752,6 +757,13 @@ void Link::Advance(ps::PocketStation& own, uint8_t buttons, double wall) {
           d.insert(d.end(), sn.a.begin(), sn.a.end());
           Put32(d, (uint32_t)sn.b.size());
           d.insert(d.end(), sn.b.begin(), sn.b.end());
+          d.push_back(host_ ? 'A' : 'B');   // which unit is this side's own
+          Put32(d, (uint32_t)own_hist_.size());
+          for (auto& h : own_hist_) {
+            Put32(d, h.first);
+            Put32(d, (uint32_t)h.second.size());
+            d.insert(d.end(), h.second.begin(), h.second.end());
+          }
           if (!dump_base_.empty()) {
             dump_base_ += "-t" + std::to_string(sn.tick);
             if (FILE* f = fopen((dump_base_ + "-ours.state").c_str(), "wb")) { fwrite(d.data(), 1, d.size(), f); fclose(f); }

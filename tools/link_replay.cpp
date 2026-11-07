@@ -4,12 +4,17 @@
 // Copyright (c) 2026 f3bandit. GPL-3.0-or-later.
 //
 //   link_replay BIOS FILE.mcpslink [SECONDS...]
+//   link_replay BIOS FILE.mcpslink --history SIDE.state
+//       compares the replay with one side's own unit, tick by tick, from the history in a dump
+//       (the -theirs.state or -ours.state saved when a link got out of step): prints the first
+//       tick where they part and what differs.
 #include "link.hpp"
 #include "pocketstation.hpp"
 
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
+#include <map>
 #include <string>
 #include <vector>
 
@@ -76,7 +81,28 @@ int main(int argc, char** argv) {
   }
   uint32_t end = recs.empty() ? 600 : recs.back().tick;
   std::vector<uint32_t> shots;
-  for (int i = 3; i < argc; i++) shots.push_back((uint32_t)(atof(argv[i]) * 60));
+  std::map<uint32_t, std::vector<u8>> hist;
+  char hist_unit = 0;
+  for (int i = 3; i < argc; i++) {
+    if (!strcmp(argv[i], "--history") && i + 1 < argc) {
+      auto d = ReadAll(argv[++i]);
+      size_t p = 4;
+      auto g = [&]() { uint32_t v = 0; if (p + 4 <= d.size()) memcpy(&v, &d[p], 4); p += 4; return v; };
+      p += g();   // unit A at the check
+      p += g();   // unit B at the check
+      if (p < d.size()) {
+        hist_unit = (char)d[p++];
+        uint32_t n = g();
+        for (uint32_t k = 0; k < n && p < d.size(); k++) {
+          uint32_t t = g(), len = g();
+          hist[t].assign(d.begin() + p, d.begin() + std::min(d.size(), p + len));
+          p += len;
+        }
+      }
+      printf("history: unit %c, %zu ticks (t%u..t%u)\n", hist_unit ? hist_unit : '?', hist.size(),
+             hist.empty() ? 0 : hist.begin()->first, hist.empty() ? 0 : hist.rbegin()->first);
+    } else shots.push_back((uint32_t)(atof(argv[i]) * 60));
+  }
   uint64_t base_a = a.t, base_b = b.t;
   int64_t us = 0;
   size_t ri = 0;
@@ -90,6 +116,28 @@ int main(int argc, char** argv) {
       ri++;
     }
     irlink::RunPair(a, b, base_a, base_b, us, (int64_t)(tick + 1) * 1000000 / 60);
+    if (!hist.empty()) {
+      auto it = hist.find(tick + 1);
+      if (it != hist.end()) {
+        auto mine = (hist_unit == 'A' ? a : b).SaveState();
+        if (mine != it->second) {
+          printf("\nFIRST DIFFERENCE at t%u (unit %c): replay vs that side's own unit\n", tick + 1, hist_unit);
+          size_t shown = 0;
+          for (size_t i = 0; i < std::min(mine.size(), it->second.size()) && shown < 40; i++)
+            if (mine[i] != it->second[i]) { printf("  +%04zx: %02x / %02x\n", i, mine[i], it->second[i]); shown++; }
+          PocketStation x;
+          x.LoadBios(bios);
+          x.LoadState(it->second);
+          auto& r = (hist_unit == 'A' ? a : b).cpu->state;
+          printf("  replay pc %08x t %llu | theirs pc %08x t %llu\n", r.r15, (unsigned long long)(hist_unit == 'A' ? a : b).t,
+                 x.cpu->state.r15, (unsigned long long)x.t);
+          Screens(a, b, "at the first difference", tick + 1);
+          return 0;
+        }
+        hist.erase(it);
+        if (hist.empty()) { printf("the whole history matches the replay\n"); return 0; }
+      }
+    }
     a.TakeAudio();
     b.TakeAudio();
     if ((tick + 1) % 30 == 0) {   // the link's step check, same formula: each unit's whole state

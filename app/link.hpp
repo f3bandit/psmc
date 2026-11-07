@@ -134,6 +134,7 @@ class Link {
   std::vector<Check> my_checks_, their_checks_;
   struct Snap { uint32_t tick; std::vector<uint8_t> a, b; };
   std::vector<Snap> snaps_;
+  std::vector<std::pair<uint32_t, std::vector<uint8_t>>> own_hist_;
   bool mismatch_ = false, got_dump_ = false;
   double mismatch_wall_ = 0;
   uint32_t last_match_ = 0;
