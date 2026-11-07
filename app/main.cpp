@@ -120,7 +120,7 @@ namespace fs = std::filesystem;
 using ps::u8;
 
 static const char* APP_NAME = "MC/PS MemCard Pro";
-static const char* APP_VERSION = "0.1.22";
+static const char* APP_VERSION = "0.1.23";
 #ifdef __ANDROID__
 #define ON_THIS_DEVICE "on this phone"
 #define ON_THIS_DEVICE_CAPS "ON THIS PHONE"
@@ -667,6 +667,17 @@ struct App {
     if (docked) { docked = false; m.SetDocked(false); }
   }
 
+  // While linked, Android is asked for low-latency Wi-Fi (it otherwise holds packets back to save
+  // power, which stalls the lockstep).
+  bool low_latency = false;
+  void SetLowLatency(bool on) {
+    if (on == low_latency) return;
+    low_latency = on;
+#ifdef __ANDROID__
+    AndroidCallStatic(on ? "lowLatencyOn" : "lowLatencyOff", "()V");
+#endif
+  }
+
   // Android only passes broadcasts (units waiting for a link) to apps that ask.
   void SetMulticast(bool on) {
     if (on == multicast) return;
@@ -789,6 +800,7 @@ struct App {
       if (!lnk.ended.empty()) Note(lnk.ended);   // why it ended
       relisten_at = now;                          // ready at once for the other side to link again
     }
+    SetLowLatency(lnk.state >= irlink::Link::STARTING);
     if (lnk.Running()) relink_until = -1;
     else if (relink_until > now && now >= relink_next && lnk.state != irlink::Link::CONNECTING &&
              lnk.state != irlink::Link::STARTING && have_bios) {

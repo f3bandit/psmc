@@ -127,6 +127,30 @@ public class MCPSActivity extends SDLActivity {
         } catch (Exception ignored) { }
     }
 
+    // Called from native code while two units are linked: low-latency Wi-Fi, so the presses the
+    // link trades don't sit in the phone's power-saving buffer.
+    private static android.net.wifi.WifiManager.WifiLock wifiLock;
+
+    @SuppressWarnings("deprecation")
+    public static void lowLatencyOn() {
+        MCPSActivity a = (MCPSActivity) mSingleton;
+        if (a == null) return;
+        try {
+            if (wifiLock == null) {
+                android.net.wifi.WifiManager wm = (android.net.wifi.WifiManager) a.getApplicationContext().getSystemService(WIFI_SERVICE);
+                int mode = Build.VERSION.SDK_INT >= 29 ? android.net.wifi.WifiManager.WIFI_MODE_FULL_LOW_LATENCY
+                                                       : android.net.wifi.WifiManager.WIFI_MODE_FULL_HIGH_PERF;
+                wifiLock = wm.createWifiLock(mode, "mcps-link");
+                wifiLock.setReferenceCounted(false);
+            }
+            wifiLock.acquire();
+        } catch (Exception ignored) { }
+    }
+
+    public static void lowLatencyOff() {
+        try { if (wifiLock != null) wifiLock.release(); } catch (Exception ignored) { }
+    }
+
     public static void multicastOff() {
         try { if (multicastLock != null) multicastLock.release(); } catch (Exception ignored) { }
     }

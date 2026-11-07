@@ -123,8 +123,9 @@ class Link {
   std::vector<uint8_t> my_state_, my_card_, their_state_, their_card_;
   bool got_start_ = false;
 
-  // Lockstep: ticks of 1/60 s; presses are sent DELAY ticks ahead.
-  static constexpr uint32_t DELAY = 6;
+  // Lockstep: ticks of 1/60 s; presses are sent DELAY ticks (250 ms) ahead, enough to ride over
+  // the few hundred ms a phone on Wi-Fi can hold packets back.
+  static constexpr uint32_t DELAY = 15;
   uint32_t tick_ = 0, sent_upto_ = 0;
   std::vector<uint8_t> mine_, theirs_;
   int64_t pair_us_ = 0;          // emulated time since the start, microseconds
