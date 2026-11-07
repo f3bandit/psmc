@@ -40,7 +40,7 @@ namespace fs = std::filesystem;
 using ps::u8;
 
 static const char* APP_NAME = "MC/PS MemCard Pro";
-static const char* APP_VERSION = "0.1.8";
+static const char* APP_VERSION = "0.1.9";
 
 // Colours from the app mockup.
 static ImU32 Col(unsigned rgb, int a = 255) { return IM_COL32((rgb >> 16) & 255, (rgb >> 8) & 255, rgb & 255, a); }
@@ -298,30 +298,34 @@ struct App {
   // card as it is now and the clock moved on: the game simply stops, the way closing it would.
   // A card must never change under a running game (the game keeps state in RAM and writes it
   // over whatever is now on the card), so dropping a file in a game exits it first.
-  float in_game = 0;                 // smoothed: share of recent frames with the CPU in an app
+  float in_game = 0;                 // 1 while a game owns the unit
+  double speaker_until = 0;          // the speaker indicator stays lit until then
   double kernel_since = -1;
   std::vector<u8> home;              // the unit at the clock
+  std::vector<u8> candidate;         // the next one, until a second later proves it
+  long long candidate_wall = 0;
   long long home_wall = 0;
   std::string HomePath() const { return dir + "PocketStation.home"; }
   bool InGame() const { return in_game > 0.5f; }
-  // A fresh look, for when the smoothed value hasn't settled (just after start-up): 20 ms of
-  // unit time sampled every millisecond.
-  bool InGameNow() {
-    int app = 0;
-    for (int i = 0; i < 20; i++) { m.RunFor(0.001); app += (m.cpu->state.r15 >> 24) == 0x02; }
-    in_game = app / 20.0f;
-    return app >= 10;
-  }
+  bool InGameNow() { in_game = KernelScreen() ? 0.0f : 1.0f; return in_game > 0.5f; }
+
+  // The J110 kernel's own screens (greeting, clock, browsing the card) keep their state at the
+  // bottom of RAM; a game owns that RAM and the kernel clears it when it starts one. Where the CPU
+  // happens to be says little: MGS sits in the kernel's idle loop most of the time.
+  bool KernelScreen() const { return m.sram[0x230] == 0x01 && m.sram[0x240] == 0x01 && m.sram[0x236] != 0x00; }
 
   void TrackHome() {
-    bool app = (m.cpu->state.r15 >> 24) == 0x02;
-    in_game = in_game * 0.9f + (app ? 0.1f : 0.0f);
-    if (app || docked) { kernel_since = -1; return; }
+    bool app = !KernelScreen();
+    in_game = app ? 1.0f : 0.0f;
+    // A snapshot only becomes the one to go back to once the unit has stayed on the kernel's
+    // screens for another second after it, so it can't be the instant a game was launched.
+    if (app || docked || m.buttons) { kernel_since = -1; candidate.clear(); return; }
     if (kernel_since < 0) kernel_since = now;
-    if (now - kernel_since >= 1.0 && in_game < 0.05f) {
-      home = m.SaveState();
-      home_wall = (long long)time(nullptr);
-      kernel_since = now;   // refresh every second while at the clock
+    if (now - kernel_since >= 1.0) {
+      if (!candidate.empty()) { home = candidate; home_wall = candidate_wall; }
+      candidate = m.SaveState();
+      candidate_wall = (long long)time(nullptr);
+      kernel_since = now;
     }
   }
 
@@ -520,6 +524,12 @@ struct App {
     if (m.CardDirty()) { cardimg = m.Card(); card_save_at = now + 1.0; }
     if (card_save_at >= 0 && now >= card_save_at) { card::Save(CardPath(), cardimg); card_save_at = -1; }
     server.Poll();
+    {
+      // The speaker indicator follows the sound itself: lit while samples moved recently.
+      const auto& pending = m.audio;
+      for (size_t i = 1; i < pending.size(); i++)
+        if (pending[i] != pending[i - 1]) { speaker_until = now + 0.25; break; }
+    }
     if (audio) {
       auto a = m.TakeAudio();
       if (SDL_GetQueuedAudioSize(audio) < 32768 * 2 / 6) {
@@ -527,6 +537,8 @@ struct App {
         for (size_t i = 0; i < a.size(); i++) out[i] = (int16_t)std::clamp(a[i] * 48, -32767, 32767);
         if (!out.empty()) SDL_QueueAudio(audio, out.data(), (Uint32)(out.size() * 2));
       }
+    } else {
+      m.TakeAudio();   // no sound device: don't let samples pile up
     }
   }
 
@@ -651,8 +663,9 @@ struct App {
     bool led = m.LedOn();
     dl->AddCircleFilled(ImVec2(x0 + 5 * s, y + 8 * s), 5 * s, led ? Col(LED_ON) : Col(0x3a2224));
     dl->AddText(ImGui::GetFont(), 13 * s, ImVec2(x0 + 16 * s, y), Col(TEXT3), "LED");
-    dl->AddText(ImGui::GetFont(), 13 * s, ImVec2(x0 + 70 * s, y), Col(TEXT3), "IR: off");
-    bool spk = m.dac.active && !(m.pio.out & 0x20);
+    const char* ir = m.IrSending() ? "IR: sending" : m.IrListening() ? "IR: receiving" : "IR: off";
+    dl->AddText(ImGui::GetFont(), 13 * s, ImVec2(x0 + 70 * s, y), (m.IrSending() || m.IrListening()) ? Col(ACCENT) : Col(TEXT3), ir);
+    bool spk = now < speaker_until;
     dl->AddText(ImGui::GetFont(), 13 * s, ImVec2(x0 + 150 * s, y), Col(TEXT3), spk ? "Speaker on" : "Speaker off");
     if (docked) dl->AddText(ImGui::GetFont(), 13 * s, ImVec2(x0 + 250 * s, y), Col(ACCENT), "Docked");
     ImGui::SetCursorScreenPos(ImVec2(x0 + iw - 70 * s, y - 5 * s));

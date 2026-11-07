@@ -622,7 +622,7 @@ void PocketStation::DevWrite(u32 addr, u32 v, u8 be) {
           case 0:
             tmr.load[ch] = v & 0xFFFF;
 #ifdef PS_TRACE_TIMER
-            if (ch == 2) fprintf(stderr, "[tmr2] load %04x pc=%08x lr=%08x t=%.3f\n", v & 0xFFFF, cpu->state.r15, cpu->state.r14, Now());
+            if (ch == 2) fprintf(stderr, "[tmr2 %p] load %04x pc=%08x t=%.4f\n", (void*)this, v & 0xFFFF, cpu->state.r15, Now());
 #endif
             if (!tmr.en[ch]) { tmr.value[ch] = v & 0xFFFF; tmr.presc[ch] = 0; }
             break;
@@ -631,7 +631,7 @@ void PocketStation::DevWrite(u32 addr, u32 v, u8 be) {
             tmr.div[ch] = v & 3;
             tmr.en[ch] = (v >> 2) & 1;
 #ifdef PS_TRACE_TIMER
-            if (ch == 2) fprintf(stderr, "[tmr2] ctrl %x pc=%08x t=%.3f\n", v & 7, cpu->state.r15, Now());
+            if (ch == 2) fprintf(stderr, "[tmr2 %p] ctrl %x pc=%08x t=%.4f\n", (void*)this, v & 7, cpu->state.r15, Now());
 #endif
             break;
         }
