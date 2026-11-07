@@ -218,8 +218,25 @@ std::string LoadRaw(const std::string& path, std::vector<u8>& into) {
   if (d.empty()) return "can't read " + path;
   if (into.size() != SIZE) into = Formatted();
   // DexDrive: 3904-byte header, then the card.
-  if (d.size() == SIZE + 3904 && memcmp(d.data(), "123-456-STD", 11) == 0) {
-    into.assign(d.begin() + 3904, d.end());
+  // Some copies in circulation are cut short; keep what's there if every block the directory uses
+  // is present, and leave the rest of the card free.
+  if (d.size() > 3904 + 8192 && d.size() <= SIZE + 3904 && memcmp(d.data(), "123-456-STD", 11) == 0) {
+    size_t have = d.size() - 3904;
+    std::vector<u8> c = Formatted();
+    std::copy(d.begin() + 3904, d.end(), c.begin());
+    for (int b = 1; b < 16; b++) {
+      bool used = (c[b * 128] & 0xF0) == 0x50;
+      if (used && (size_t)(b + 1) * 8192 > have) return "the .gme file is cut short and missing saves";
+      if (!used && (size_t)b * 8192 >= have) {  // directory entry lies beyond nothing: mark free
+        std::fill(c.begin() + b * 128, c.begin() + b * 128 + 128, 0);
+        c[b * 128] = 0xA0;
+        c[b * 128 + 8] = c[b * 128 + 9] = 0xFF;
+        u8 x = 0;
+        for (int i = 0; i < 127; i++) x ^= c[b * 128 + i];
+        c[b * 128 + 127] = x;
+      }
+    }
+    into = c;
     return "";
   }
   if (d.size() == SIZE) {
