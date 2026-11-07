@@ -34,7 +34,7 @@ namespace irlink {
 
 namespace {
 
-constexpr uint32_t VERSION = 3;   // 3: presses 15 ticks ahead; 2: per-unit checks every half second, dumps
+constexpr uint32_t VERSION = 4;   // 4: infrared receive level the right way up; 3: presses 15 ticks ahead; 2: per-unit checks every half second, dumps
 enum : uint8_t { M_HELLO = 1, M_START = 2, M_INPUT = 3, M_CHECK = 4, M_BYE = 5, M_PING = 6, M_PONG = 7, M_DUMP = 8 };
 const char* ADVERT = "MCPSLINK1";
 

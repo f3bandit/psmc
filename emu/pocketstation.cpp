@@ -176,7 +176,10 @@ static u16 RequestLevels(const PocketStation& m) {
   if (m.host.sel_low && m.spi.LinkOn()) req |= 1 << INT_SPI;
   if (m.rtc.tick) req |= 1 << INT_RTC;
   if (m.docked) req |= 1 << INT_BAT;
-  if (m.IrListening() && m.ir_light) req |= 1 << INT_IF;   // ps_irda rx_level
+  // ps_irda rx_level: the demodulated line, active low. While receiving it reads high with no
+  // light and low while the far side's emitter is on (Chocobo World times its bits on exactly
+  // that: the header is the low phase); low in stand-by and while transmitting.
+  if (m.IrListening() && !m.ir_light) req |= 1 << INT_IF;
   return req;
 }
 
