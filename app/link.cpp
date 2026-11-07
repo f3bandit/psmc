@@ -412,7 +412,10 @@ void Link::StepPair(ps::PocketStation& a, ps::PocketStation& b, int64_t until_us
     pair_us_ += s;
     // Whole master ticks from whole microseconds: no floating point, so a PC and a phone land
     // on exactly the same cycle.
-    uint64_t d = (uint64_t)((unsigned __int128)pair_us_ * ps::MASTER_HZ * 65536u / 1000000u);
+    // MASTER_HZ * 65536 / 1e6 is 8187281408 / 15625 ticks per microsecond; split so 64 bits do.
+    static_assert((uint64_t)ps::MASTER_HZ * 65536u * 15625u == 8187281408ull * 1000000u, "master clock changed");
+    uint64_t q = (uint64_t)pair_us_ / 15625, r = (uint64_t)pair_us_ % 15625;
+    uint64_t d = q * 8187281408ull + r * 8187281408ull / 15625;
     a.RunUntil(base_a_ + d);
     b.RunUntil(base_b_ + d);
   }
