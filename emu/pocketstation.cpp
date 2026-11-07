@@ -176,6 +176,7 @@ static u16 RequestLevels(const PocketStation& m) {
   if (m.host.sel_low && m.spi.LinkOn()) req |= 1 << INT_SPI;
   if (m.rtc.tick) req |= 1 << INT_RTC;
   if (m.docked) req |= 1 << INT_BAT;
+  if (m.IrListening() && m.ir_light) req |= 1 << INT_IF;   // ps_irda rx_level
   return req;
 }
 

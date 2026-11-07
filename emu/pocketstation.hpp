@@ -155,6 +155,11 @@ struct PocketStation {
   struct Dac { bool active = false; u16 level = 0; } dac;
   u8 lvd_ctrl = 3;
   u8 irda_static = 2, irda_dynamic = 0;
+  // Infrared, ps_irda. The far side is another unit: `ir_light` is true while its emitter is
+  // on (the receiver demodulates the 40 kHz subcarrier to a level).
+  bool ir_light = false;
+  bool IrSending() const { return (irda_static & 1) && !(irda_static & 2) && (irda_dynamic & 1); }
+  bool IrListening() const { return !(irda_static & 1) && !(irda_static & 2); }
 
   // Card port, rtl/ps_spi.sv.
   struct Spi {
