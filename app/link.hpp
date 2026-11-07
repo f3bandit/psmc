@@ -16,6 +16,7 @@
 #include "../emu/pocketstation.hpp"
 
 #include <cstdint>
+#include <cstdio>
 #include <memory>
 #include <string>
 #include <vector>
@@ -29,6 +30,13 @@ struct Found {
   int port = PORT;
   double seen = 0;
 };
+
+// Runs two units face to face up to `until_us` microseconds after their start ticks: each one's
+// receiver sees the other's light, in 100 us slices while either has its infrared on. The link and
+// tools/link_replay both run units with this, so a replay is the same to the cycle.
+void RunPair(ps::PocketStation& a, ps::PocketStation& b, uint64_t base_a, uint64_t base_b, int64_t& pair_us, int64_t until_us);
+bool IrOn(const ps::PocketStation& u);
+constexpr uint32_t REPLAY_MAGIC = 0x4C53434D;   // "MCSL"
 
 class Link {
  public:
@@ -67,6 +75,10 @@ class Link {
   // `log_path` set every line is also appended to that file.
   std::vector<std::string> log;
   std::string log_path;
+  // The replay: with `replay_dir` set, each link is saved there as link-YYYYMMDD-HHMMSS.mcpslink:
+  // both units and cards as they started, then every press of either, by tick. The link is exact,
+  // so tools/link_replay runs it again cycle for cycle (screens, infrared, everything).
+  std::string replay_dir;
 
   static std::string LocalIp();
 
@@ -79,6 +91,7 @@ class Link {
   void Close();
   void Sweep(double now);
   void Log(const std::string& line);
+  FILE* replay_ = nullptr;
   std::string NameA() const { return host_ ? name_ : peer_name; }
   std::string NameB() const { return host_ ? peer_name : name_; }
   // Monitor state: per unit, its IR mode and the pulses of the current infrared session.

@@ -120,7 +120,7 @@ namespace fs = std::filesystem;
 using ps::u8;
 
 static const char* APP_NAME = "MC/PS MemCard Pro";
-static const char* APP_VERSION = "0.1.19";
+static const char* APP_VERSION = "0.1.20";
 #ifdef __ANDROID__
 #define ON_THIS_DEVICE "on this phone"
 #define ON_THIS_DEVICE_CAPS "ON THIS PHONE"
@@ -1677,6 +1677,7 @@ int main(int argc, char** argv) {
 #endif
   app.cfg.Load(app.dir + "mcps.ini");
   app.lnk.log_path = app.dir + "link.log";   // the link monitor, beside the card
+  app.lnk.replay_dir = app.dir;              // and a replay of each link (link-*.mcpslink)
   {
     // This unit's name on the network: the phone's model or the PC's name.
 #ifdef __ANDROID__

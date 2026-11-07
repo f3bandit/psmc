@@ -174,6 +174,12 @@ bool Link::Join(const std::string& ip, int port, const std::string& name) {
 
 void Link::Stop(const std::string& why) {
   if (state == RUNNING) Log("LINK END  " + (why.empty() ? std::string("(no reason)") : why));
+  if (replay_) {
+    uint8_t rec[6] = {(uint8_t)tick_, (uint8_t)(tick_ >> 8), (uint8_t)(tick_ >> 16), (uint8_t)(tick_ >> 24), 0xFF, 0xFF};   // the end
+    fwrite(rec, 1, 6, replay_);
+    fclose(replay_);
+    replay_ = nullptr;
+  }
   if (connected_ && sock_ >= 0) {
     // Say goodbye if the socket takes it; never wait, never fail over it.
     connected_ = false;
@@ -549,11 +555,57 @@ void Link::Start(ps::PocketStation& own, const std::vector<uint8_t>& bios) {
            NameA().c_str(), NameB().c_str(), peer_ip.c_str(), crc(a), crc(b));
   Log("");
   Log(line);
+  if (!replay_dir.empty()) {
+    char fn[64];
+    time_t now = time(nullptr);
+    strftime(fn, sizeof fn, "link-%Y%m%d-%H%M%S.mcpslink", localtime(&now));
+    replay_ = fopen((replay_dir + fn).c_str(), "wb");
+    if (replay_) {
+      auto put = [&](const std::vector<uint8_t>& v) {
+        uint32_t n = (uint32_t)v.size();
+        fwrite(&n, 4, 1, replay_);
+        fwrite(v.data(), 1, v.size(), replay_);
+      };
+      uint32_t magic = REPLAY_MAGIC;
+      fwrite(&magic, 4, 1, replay_);
+      std::string names = NameA() + "\n" + NameB();
+      put(std::vector<uint8_t>(names.begin(), names.end()));
+      put(a.SaveState());
+      put(a.Card());
+      put(b.SaveState());
+      put(b.Card());
+      fflush(replay_);
+      Log("replay: " + std::string(fn));
+    }
+  }
 }
 
 // A unit with its infrared in use: transmitter or receiver switched on.
-static bool IrOn(const ps::PocketStation& u) {
+bool IrOn(const ps::PocketStation& u) {
   return ((u.irda_static & 1) && !(u.irda_static & 2)) || u.IrListening();
+}
+
+static uint64_t UsToTicks(int64_t us) {
+  // MASTER_HZ * 65536 / 1e6 is 8187281408 / 15625 ticks per microsecond; split so 64 bits do.
+  static_assert((uint64_t)ps::MASTER_HZ * 65536u * 15625u == 8187281408ull * 1000000u, "master clock changed");
+  uint64_t q = (uint64_t)us / 15625, r = (uint64_t)us % 15625;
+  return q * 8187281408ull + r * 8187281408ull / 15625;
+}
+
+void RunPair(ps::PocketStation& a, ps::PocketStation& b, uint64_t base_a, uint64_t base_b, int64_t& pair_us, int64_t until_us) {
+  while (pair_us < until_us) {
+    bool ir = IrOn(a) || IrOn(b);
+    int64_t s = ir ? std::min<int64_t>(100, until_us - pair_us) : until_us - pair_us;
+    bool la = a.IrSending(), lb = b.IrSending();
+    a.ir_light = lb;
+    b.ir_light = la;
+    pair_us += s;
+    // Whole master ticks from whole microseconds: no floating point, so a PC and a phone land on
+    // exactly the same cycle.
+    uint64_t d = UsToTicks(pair_us);
+    a.RunUntil(base_a + d);
+    b.RunUntil(base_b + d);
+  }
 }
 
 void Link::StepPair(ps::PocketStation& a, ps::PocketStation& b, int64_t until_us) {
@@ -561,19 +613,8 @@ void Link::StepPair(ps::PocketStation& a, ps::PocketStation& b, int64_t until_us
   // its infrared on, in 100 us slices (a bit is about 2 ms); otherwise a whole tick at once.
   while (pair_us_ < until_us) {
     bool ir = IrOn(a) || IrOn(b);
-    int64_t s = ir ? std::min<int64_t>(100, until_us - pair_us_) : until_us - pair_us_;
-    bool la = a.IrSending(), lb = b.IrSending();
-    a.ir_light = lb;
-    b.ir_light = la;
-    pair_us_ += s;
-    // Whole master ticks from whole microseconds: no floating point, so a PC and a phone land
-    // on exactly the same cycle.
-    // MASTER_HZ * 65536 / 1e6 is 8187281408 / 15625 ticks per microsecond; split so 64 bits do.
-    static_assert((uint64_t)ps::MASTER_HZ * 65536u * 15625u == 8187281408ull * 1000000u, "master clock changed");
-    uint64_t q = (uint64_t)pair_us_ / 15625, r = (uint64_t)pair_us_ % 15625;
-    uint64_t d = q * 8187281408ull + r * 8187281408ull / 15625;
-    a.RunUntil(base_a_ + d);
-    b.RunUntil(base_b_ + d);
+    int64_t next = ir ? std::min<int64_t>(pair_us_ + 100, until_us) : until_us;
+    RunPair(a, b, base_a_, base_b_, pair_us_, next);
     if (ir || IrOn(a) || IrOn(b)) {
       if (!ir_session_) {
         ir_session_ = true;
@@ -637,6 +678,11 @@ void Link::Advance(ps::PocketStation& own, uint8_t buttons, double wall) {
       if (v & ~w.buttons) Log(l);
       w.buttons = v;
     };
+    if (replay_ && (ba != wa_.buttons || bb != wb_.buttons)) {
+      uint8_t rec[6] = {(uint8_t)tick_, (uint8_t)(tick_ >> 8), (uint8_t)(tick_ >> 16), (uint8_t)(tick_ >> 24), ba, bb};
+      fwrite(rec, 1, 6, replay_);
+      fflush(replay_);
+    }
     press(wa_, ba, "A " + NameA());
     press(wb_, bb, "B " + NameB());
     a.SetButtons(ba);

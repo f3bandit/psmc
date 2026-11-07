@@ -103,6 +103,7 @@ int main(int argc, char** argv) {
   ub.RunFor(1.234);
 
   irlink::Link la, lb;
+  la.replay_dir = "/tmp/";
   if (!la.Host("Side A")) { printf("host: %s\n", la.status.c_str()); return 1; }
   double wall = 0;
   for (int i = 0; i < 60; i++) { la.Poll(wall, ua, bios); lb.Discover(wall); wall += 0.05; }
