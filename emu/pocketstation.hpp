@@ -160,6 +160,10 @@ struct PocketStation {
   // Infrared, ps_irda. The far side is another unit: `ir_light` is true while its emitter is
   // on (the receiver demodulates the 40 kHz subcarrier to a level).
   bool ir_light = false;
+  // For whoever runs the far side (the IR link): when this unit's emitter last went dark and
+  // whether it was lit, in that runner's microseconds. Not part of a saved state.
+  int64_t ir_dark_us = -1000000;
+  bool ir_was_lit = false;
   bool IrSending() const { return (irda_static & 1) && !(irda_static & 2) && (irda_dynamic & 1); }
   bool IrListening() const { return !(irda_static & 1) && !(irda_static & 2); }
 

@@ -34,7 +34,7 @@ namespace irlink {
 
 namespace {
 
-constexpr uint32_t VERSION = 4;   // 4: infrared receive level the right way up; 3: presses 15 ticks ahead; 2: per-unit checks every half second, dumps
+constexpr uint32_t VERSION = 5;   // 5: the receiver's tail; 4: infrared receive level the right way up; 3: presses 15 ticks ahead; 2: per-unit checks every half second, dumps
 enum : uint8_t { M_HELLO = 1, M_START = 2, M_INPUT = 3, M_CHECK = 4, M_BYE = 5, M_PING = 6, M_PONG = 7, M_DUMP = 8 };
 const char* ADVERT = "MCPSLINK1";
 
@@ -543,6 +543,8 @@ void Link::Start(ps::PocketStation& own, const std::vector<uint8_t>& bios) {
   peer->LoadCard(their_card_);
   if (!peer->LoadState(their_state_)) { Stop("Couldn't load the other unit"); return; }
   own.ir_light = peer->ir_light = false;
+  own.ir_dark_us = peer->ir_dark_us = -1000000;   // the same on both sides, from the start
+  own.ir_was_lit = peer->ir_was_lit = false;
   ps::PocketStation& a = host_ ? own : *peer;
   ps::PocketStation& b = host_ ? *peer : own;
   base_a_ = a.t;
@@ -610,13 +612,29 @@ static uint64_t UsToTicks(int64_t us) {
   return q * 8187281408ull + r * 8187281408ull / 15625;
 }
 
+// A real receiver module's output stays on a little after the light goes (the games time their
+// bits expecting it: Chocobo World takes 224 timer counts, 112 us, off every lit pulse and adds
+// them to every dark one; the Japanese version's tighter timing reads a '1' as a '0' without it).
+constexpr int64_t RX_TAIL_US = 112;
+
+static bool Seen(ps::PocketStation& u, int64_t now_us) {
+  bool lit = u.IrSending();
+  if (u.ir_was_lit && !lit) u.ir_dark_us = now_us;
+  u.ir_was_lit = lit;
+  return lit || now_us - u.ir_dark_us < RX_TAIL_US;
+}
+
 void RunPair(ps::PocketStation& a, ps::PocketStation& b, uint64_t base_a, uint64_t base_b, int64_t& pair_us, int64_t until_us) {
   while (pair_us < until_us) {
     bool ir = IrOn(a) || IrOn(b);
     int64_t s = ir ? std::min<int64_t>(g_slice_us, until_us - pair_us) : until_us - pair_us;
-    bool la = a.IrSending(), lb = b.IrSending();
-    a.ir_light = lb;
-    b.ir_light = la;
+    a.ir_light = Seen(b, pair_us);
+    b.ir_light = Seen(a, pair_us);
+    // A tail ends on its own microsecond, not at the end of a slice.
+    for (auto* u : {&a, &b}) {
+      int64_t end = u->ir_dark_us + RX_TAIL_US;
+      if (!u->ir_was_lit && end > pair_us && end - pair_us < s) s = end - pair_us;
+    }
     pair_us += s;
     // Whole master ticks from whole microseconds: no floating point, so a PC and a phone land on
     // exactly the same cycle.
