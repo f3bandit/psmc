@@ -331,7 +331,7 @@ struct App {
 
   void SaveHome() {
     if (home.empty() || !have_bios) return;
-    std::vector<u8> out = {'M', 'C', 'P', 'S', 'H', 'O', 'M', '1'};
+    std::vector<u8> out = {'M', 'C', 'P', 'S', 'H', 'O', 'M', '2'};
     u32 h = Fnv(bios_rom);
     out.insert(out.end(), (u8*)&h, (u8*)&h + 4);
     out.insert(out.end(), (u8*)&home_wall, (u8*)&home_wall + 8);
@@ -344,7 +344,7 @@ struct App {
 
   void LoadHome() {
     auto d = ReadFile(HomePath());
-    if (d.size() < 20 || memcmp(d.data(), "MCPSHOM1", 8) != 0) return;
+    if (d.size() < 20 || memcmp(d.data(), "MCPSHOM2", 8) != 0) return;
     u32 h;
     memcpy(&h, &d[8], 4);
     if (h != Fnv(bios_rom)) return;
