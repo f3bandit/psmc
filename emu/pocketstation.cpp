@@ -284,7 +284,11 @@ void PocketStation::CrystalTick() {
 }
 
 void PocketStation::RunFor(double seconds) {
-  u64 target = t + (u64)(seconds * MASTER_HZ * 65536.0);
+  if (seconds <= 0) return;
+  RunUntil(t + (u64)(seconds * MASTER_HZ * 65536.0));
+}
+
+void PocketStation::RunUntil(u64 target) {
   while (t < target) {
     if (clk.standby) {
       // ps_clkctl: the system clock stops; only crystal-driven blocks run.

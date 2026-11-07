@@ -3,13 +3,17 @@
 // copies of both units stay identical and prints both screens.
 // Copyright (c) 2026 f3bandit. GPL-3.0-or-later.
 //
-//   link_test BIOS MGS_CARD
+//   link_test BIOS MGS_CARD              both sides in one process
+//   link_test BIOS MGS_CARD host         one side, waiting (run the other side with "join IP")
+//   link_test BIOS MGS_CARD join IP      prints a checksum of both units: the sides must agree
 #include "card.hpp"
 #include "link.hpp"
 #include "pocketstation.hpp"
 
+#include <chrono>
 #include <cstdio>
 #include <cstring>
+#include <thread>
 
 using namespace ps;
 
@@ -46,9 +50,52 @@ static void Boot(PocketStation& m, const std::vector<u8>& bios, u32 serial, cons
   m.RunFor(4);
 }
 
+static uint32_t Crc(const PocketStation& m, uint32_t c = 0) {
+  auto s = m.SaveState();
+  c = ~c;
+  for (u8 x : s) { c ^= x; for (int k = 0; k < 8; k++) c = (c >> 1) ^ (0xEDB88320u & (0u - (c & 1))); }
+  return ~c;
+}
+
+// One side in its own process: B receives, A sends, scripted by tick so both runs are the same.
+static int OneSide(const std::vector<u8>& bios, const char* card, bool host, const char* ip) {
+  PocketStation u;
+  Boot(u, bios, host ? 0x11112222 : 0x33334444, card);
+  if (!host) u.RunFor(1.234);
+  irlink::Link l;
+  if (host ? !l.Host("Host side") : !l.Join(ip, irlink::PORT, "Join side")) { printf("%s\n", l.status.c_str()); return 1; }
+  auto t0 = std::chrono::steady_clock::now();
+  auto wall = [&] { return std::chrono::duration<double>(std::chrono::steady_clock::now() - t0).count(); };
+  struct Ev { uint32_t tick; int btn; };
+  std::vector<Ev> evs = host ? std::vector<Ev>{{30, BTN_UP}, {210, BTN_UP}, {240, BTN_ENTER}}
+                             : std::vector<Ev>{{30, BTN_UP}, {90, BTN_UP}, {120, BTN_UP}, {150, BTN_ENTER}};
+  while (wall() < 120) {
+    l.Poll(wall(), u, bios);
+    if (l.state == irlink::Link::OFF) { printf("ended: %s\n", l.status.c_str()); return 1; }
+    if (l.Running()) {
+      uint32_t at = l.Tick() + 6;   // the tick these presses will land on
+      u8 b = 0;
+      for (auto& e : evs) if (at >= e.tick && at < e.tick + 8) b |= 1 << e.btn;
+      l.Advance(u, b, wall());
+      u.TakeAudio();
+      if (l.Tick() >= 1500) break;
+    }
+    std::this_thread::sleep_for(std::chrono::milliseconds(4));
+  }
+  PocketStation& a = host ? u : *l.peer;
+  PocketStation& b = host ? *l.peer : u;
+  printf("tick %u: host unit %08x, join unit %08x\n", l.Tick(), Crc(a), Crc(b));
+  u8 f[32][32];
+  u.Frame(f);
+  for (int y = 0; y < 32; y++) { for (int x = 0; x < 32; x++) putchar(f[y][x] ? '#' : '.'); putchar('\n'); }
+  for (int i = 0; i < 100; i++) { l.Poll(wall(), u, bios); std::this_thread::sleep_for(std::chrono::milliseconds(10)); }
+  return 0;
+}
+
 int main(int argc, char** argv) {
-  if (argc < 3) { fprintf(stderr, "link_test BIOS MGS_CARD\n"); return 1; }
+  if (argc < 3) { fprintf(stderr, "link_test BIOS MGS_CARD [host | join IP]\n"); return 1; }
   auto bios = ReadAll(argv[1]);
+  if (argc > 3) return OneSide(bios, argv[2], strcmp(argv[3], "host") == 0, argc > 4 ? argv[4] : "127.0.0.1");
   PocketStation ua, ub;
   Boot(ua, bios, 0x11112222, argv[2]);
   Boot(ub, bios, 0x33334444, argv[2]);

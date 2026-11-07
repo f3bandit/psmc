@@ -120,7 +120,7 @@ namespace fs = std::filesystem;
 using ps::u8;
 
 static const char* APP_NAME = "MC/PS MemCard Pro";
-static const char* APP_VERSION = "0.1.15";
+static const char* APP_VERSION = "0.1.16";
 #ifdef __ANDROID__
 #define ON_THIS_DEVICE "on this phone"
 #define ON_THIS_DEVICE_CAPS "ON THIS PHONE"
@@ -650,6 +650,11 @@ struct App {
     return b;
   }
 
+  // A unit in the console can't link: out of the dock first (the console sees no card meanwhile).
+  void Undock() {
+    if (docked) { docked = false; m.SetDocked(false); }
+  }
+
   // Android only passes broadcasts (units waiting for a link) to apps that ask.
   void SetMulticast(bool on) {
     if (on == multicast) return;
@@ -680,11 +685,12 @@ struct App {
       ImGui::PopStyleColor();
       ImGui::Dummy(ImVec2(0, 4));
       if (!have_bios) ImGui::BeginDisabled();
-      if (ImGui::Button("Wait for a link", ImVec2(w, 40))) lnk.Host(link_name);
+      if (ImGui::Button("Wait for a link", ImVec2(w, 40))) { Undock(); lnk.Host(link_name); }
       for (auto& f : lnk.found) {
         ImGui::PushID(f.ip.c_str());
         if (ListCard(("Link with " + f.name).c_str(), (f.ip + " · waiting for a link").c_str(), nullptr, false, w)) {
           strncpy(link_ip, f.ip.c_str(), sizeof link_ip - 1);
+          Undock();
           lnk.Join(f.ip, f.port, link_name);
         }
         ImGui::PopID();
@@ -697,7 +703,7 @@ struct App {
       ImGui::SetNextItemWidth(w - 88);
       ImGui::InputTextWithHint("##ip", "or its address, e.g. 192.168.1.20", link_ip, sizeof link_ip, ImGuiInputTextFlags_CharsDecimal);
       ImGui::SameLine(0, 8);
-      if (ImGui::Button("Link", ImVec2(80, 0)) && link_ip[0]) lnk.Join(link_ip, irlink::PORT, link_name);
+      if (ImGui::Button("Link", ImVec2(80, 0)) && link_ip[0]) { Undock(); lnk.Join(link_ip, irlink::PORT, link_name); }
       if (!have_bios) ImGui::EndDisabled();
     } else {
       SetMulticast(false);
@@ -736,11 +742,13 @@ struct App {
     if (!have_bios) return;
     u8 held = Buttons(keys);
     m.SetButtons(held);
-    if (docked && now >= undock_at) { docked = false; m.SetDocked(false); }
+    if (docked && now >= undock_at && !lnk.Running()) { docked = false; m.SetDocked(false); }
     if (clock_sync_at >= 0 && now >= clock_sync_at && !lnk.Busy()) { clock_sync_at = -1; SyncClock(); }
+    bool was_linked = lnk.Running();
     if (lnk.Busy()) lnk.Poll(now, m, bios_rom);
     if (lnk.Running()) lnk.Advance(m, held, SDL_GetTicks64() / 1000.0);    // both units, in step
     else if (lnk.state != irlink::Link::STARTING) { m.ir_light = false; m.RunFor(std::min(dt, cap)); }
+    if (was_linked && !lnk.Running() && !lnk.status.empty()) Note(lnk.status);   // why it ended
     if (link_panel_at >= 0 && now - link_panel_at > 0.5) { lnk.StopDiscovery(); link_panel_at = -1; SetMulticast(false); }
     TrackHome();
     if (state_save_at < 0) state_save_at = now + 30;
@@ -774,7 +782,7 @@ struct App {
 
   void StartServer() {
     server.card_raw = [this](const std::vector<unsigned char>& tx, bool& complete) {
-      if (lnk.state >= irlink::Link::STARTING) { complete = false; return std::vector<unsigned char>(); }   // busy linking
+      if (lnk.Busy()) { complete = false; return std::vector<unsigned char>(); }   // linking: the card is away
       if (!docked) { docked = true; m.SetDocked(true); }
       undock_at = now + 3.0;   // back to games 3 s after the console stops talking
       auto r = m.CardCommand(tx);

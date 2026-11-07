@@ -56,6 +56,7 @@ class Link {
   void Advance(ps::PocketStation& own, uint8_t buttons, double wall);
   bool Running() const { return state == RUNNING; }
   bool Busy() const { return state != OFF; }
+  uint32_t Tick() const { return tick_; }   // 1/60 s steps run together so far
 
   static std::string LocalIp();
 
@@ -82,7 +83,8 @@ class Link {
   uint32_t tick_ = 0, sent_upto_ = 0;
   std::vector<uint8_t> mine_, theirs_;
   int64_t pair_us_ = 0;          // emulated time since the start, microseconds
-  double base_a_ = 0, base_b_ = 0, start_wall_ = -1;
+  uint64_t base_a_ = 0, base_b_ = 0;   // each unit's master tick at the start
+  double start_wall_ = -1;
   std::vector<std::pair<uint32_t, uint32_t>> my_checks_, their_checks_;
 };
 

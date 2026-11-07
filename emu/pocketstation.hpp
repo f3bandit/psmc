@@ -61,6 +61,8 @@ struct PocketStation {
 
   // --- running -------------------------------------------------------------------------------
   void RunFor(double seconds);                       // unit time
+  void RunUntil(u64 target);                         // to master tick `target` (16.16), exactly:
+                                                     // the same on every machine (the IR link)
   double Now() const { return (double)(t >> 16) / MASTER_HZ; }
 
   // --- outside world ------------------------------------------------------------------------

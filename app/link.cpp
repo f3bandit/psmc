@@ -388,8 +388,8 @@ void Link::Start(ps::PocketStation& own, const std::vector<uint8_t>& bios) {
   own.ir_light = peer->ir_light = false;
   ps::PocketStation& a = host_ ? own : *peer;
   ps::PocketStation& b = host_ ? *peer : own;
-  base_a_ = a.Now();
-  base_b_ = b.Now();
+  base_a_ = a.t;
+  base_b_ = b.t;
   pair_us_ = 0;
   tick_ = 0;
   mine_.assign(DELAY, 0);
@@ -410,9 +410,11 @@ void Link::StepPair(ps::PocketStation& a, ps::PocketStation& b, int64_t until_us
     a.ir_light = lb;
     b.ir_light = la;
     pair_us_ += s;
-    double t = pair_us_ * 1e-6;
-    a.RunFor(base_a_ + t - a.Now());
-    b.RunFor(base_b_ + t - b.Now());
+    // Whole master ticks from whole microseconds: no floating point, so a PC and a phone land
+    // on exactly the same cycle.
+    uint64_t d = (uint64_t)((unsigned __int128)pair_us_ * ps::MASTER_HZ * 65536u / 1000000u);
+    a.RunUntil(base_a_ + d);
+    b.RunUntil(base_b_ + d);
   }
 }
 
