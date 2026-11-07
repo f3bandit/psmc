@@ -407,7 +407,7 @@ u32 PocketStation::MemctlRead(u32 off, bool side_effects) {
     case 0x00C: return mem.boot_wait;
     case 0x010: return (mem.fdc & 0x7B) | (flash.Busy() ? 0 : 4);
 #ifdef PS_TRACE_SERIAL
-    case 0x300: if (side_effects) fprintf(stderr, "[serial] lo read pc=%08x lr=%08x\n", cpu->state.r15, cpu->state.r14); return sig.serial_lo;
+    case 0x300: if (side_effects) fprintf(stderr, "[serial] lo read pc=%08x lr=%08x t=%.3f val=%04x%04x active=%04x vaddr=%x,%x,%x,%x virt=%d\n", cpu->state.r15, cpu->state.r14, Now(), sig.serial_hi, sig.serial_lo, mem.active, mem.vaddr[0], mem.vaddr[1], mem.vaddr[2], mem.vaddr[3], mem.flashvir); return sig.serial_lo;
     case 0x302: if (side_effects) fprintf(stderr, "[serial] hi read pc=%08x\n", cpu->state.r15); return sig.serial_hi;
 #else
     case 0x300: return sig.serial_lo;
@@ -446,7 +446,14 @@ void PocketStation::MemctlWrite(u32 off, u32 value, u8 be) {
       break;
     case 0x008: if (!mem.flashvir) mem.active = Merge(mem.active, value, be) & 0xFFFF; break;
     case 0x00C: mem.boot_wait = Merge(mem.boot_wait, value, be) & 0x1F; break;
-    case 0x010: mem.fdc = Merge(mem.fdc, value, be) & 0x7F; break;
+    case 0x010: {
+      u8 was = mem.fdc;
+      mem.fdc = Merge(mem.fdc, value, be) & 0x7F;
+      // Step 6: ENPRG or LOADPAGE cleared after the data writes commits the page now.
+      bool ended = ((was & 1) && !(mem.fdc & 1)) || ((was & 0x20) && !(mem.fdc & 0x20));
+      if (ended && flash.seq == Flash::ARMED && flash.page_valid) flash.delay = 0;
+      break;
+    }
     default: break;
   }
 }
@@ -465,6 +472,14 @@ void PocketStation::Flash::Commit() {
   dirty = true;
 }
 
+// The page commits once software ends the sequence (clears ENPRG or LOADPAGE, step 6 of Sony's
+// sequence) or, for software that only polls BUSY, after a quiet spell with no data writes.
+// ps_flash uses about 100 us for that spell, measured in crystal ticks; at the slow CPU rates
+// (MGS Integral saves at 63 kHz, ~16 us a clock) the program loop is slower than that between
+// halfwords, so the page committed after its first halfword and the rest read erased. The real
+// part clearly waits longer; 64 ticks (about 2 ms) still settles promptly.
+static constexpr int FLASH_SETTLE_TICKS = 64;
+
 void PocketStation::FlashWrite(u32 h, u16 v) {
   constexpr u32 KEY_A = 0x2AD5, KEY_B = 0x152A;   // 080055AA, 08002A54
   bool enprg = mem.fdc & 1, lock = mem.fdc & 2, loadpage = mem.fdc & 0x20, loadsgn = mem.fdc & 0x40;
@@ -479,7 +494,7 @@ void PocketStation::FlashWrite(u32 h, u16 v) {
       f.seq = (h == KEY_B && v == 0xFF55) ? Flash::KEY2 : Flash::IDLE;
       break;
     case Flash::KEY2:
-      if (h == KEY_A && v == 0xFFA0) { f.seq = Flash::ARMED; f.page_valid = 0; f.delay = 4; }
+      if (h == KEY_A && v == 0xFFA0) { f.seq = Flash::ARMED; f.page_valid = 0; f.delay = FLASH_SETTLE_TICKS; }
       else f.seq = Flash::IDLE;
       break;
     case Flash::ARMED:
@@ -490,16 +505,16 @@ void PocketStation::FlashWrite(u32 h, u16 v) {
           case 0x01: sig.serial_hi = v; break;
           case 0x04: sig.cal = v; break;
         }
-        f.delay = 4;
+        f.delay = FLASH_SETTLE_TICKS;
       } else if (!f.page_valid) {
         f.sector = h >> 6;
         f.page[h & 63] = v;
         f.page_valid |= 1ull << (h & 63);
-        f.delay = 4;
+        f.delay = FLASH_SETTLE_TICKS;
       } else if ((h >> 6) == f.sector) {
         f.page[h & 63] = v;
         f.page_valid |= 1ull << (h & 63);
-        f.delay = 4;
+        f.delay = FLASH_SETTLE_TICKS;
       } else {
         f.Commit();   // a write outside the sector ends the window
       }

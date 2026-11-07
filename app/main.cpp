@@ -40,7 +40,7 @@ namespace fs = std::filesystem;
 using ps::u8;
 
 static const char* APP_NAME = "MC/PS MemCard Pro";
-static const char* APP_VERSION = "0.1.7";
+static const char* APP_VERSION = "0.1.8";
 
 // Colours from the app mockup.
 static ImU32 Col(unsigned rgb, int a = 255) { return IM_COL32((rgb >> 16) & 255, (rgb >> 8) & 255, rgb & 255, a); }
@@ -216,6 +216,8 @@ struct App {
 
   void PowerOn() {
     m.LoadCard(cardimg);
+    home.clear();
+    LoadHome();
     if (RestoreState()) { GiveSerial(); Bind(); return; }
     GiveSerial();
     Bind();
@@ -286,6 +288,100 @@ struct App {
     if (!ok) { remove(tmp.c_str()); return; }
     remove(p.c_str());
     rename(tmp.c_str(), p.c_str());
+    SaveHome();
+  }
+
+  // --- leaving a game ---------------------------------------------------------------------
+  // Most PocketStation games have no way back to the clock but the Reset button, which also
+  // loses the clock setting. So whenever the unit sits in the kernel (the clock, browsing the
+  // card) the app keeps a snapshot of it, and "Exit game" goes back to that snapshot with the
+  // card as it is now and the clock moved on: the game simply stops, the way closing it would.
+  // A card must never change under a running game (the game keeps state in RAM and writes it
+  // over whatever is now on the card), so dropping a file in a game exits it first.
+  float in_game = 0;                 // smoothed: share of recent frames with the CPU in an app
+  double kernel_since = -1;
+  std::vector<u8> home;              // the unit at the clock
+  long long home_wall = 0;
+  std::string HomePath() const { return dir + "PocketStation.home"; }
+  bool InGame() const { return in_game > 0.5f; }
+  // A fresh look, for when the smoothed value hasn't settled (just after start-up): 20 ms of
+  // unit time sampled every millisecond.
+  bool InGameNow() {
+    int app = 0;
+    for (int i = 0; i < 20; i++) { m.RunFor(0.001); app += (m.cpu->state.r15 >> 24) == 0x02; }
+    in_game = app / 20.0f;
+    return app >= 10;
+  }
+
+  void TrackHome() {
+    bool app = (m.cpu->state.r15 >> 24) == 0x02;
+    in_game = in_game * 0.9f + (app ? 0.1f : 0.0f);
+    if (app || docked) { kernel_since = -1; return; }
+    if (kernel_since < 0) kernel_since = now;
+    if (now - kernel_since >= 1.0 && in_game < 0.05f) {
+      home = m.SaveState();
+      home_wall = (long long)time(nullptr);
+      kernel_since = now;   // refresh every second while at the clock
+    }
+  }
+
+  void SaveHome() {
+    if (home.empty() || !have_bios) return;
+    std::vector<u8> out = {'M', 'C', 'P', 'S', 'H', 'O', 'M', '1'};
+    u32 h = Fnv(bios_rom);
+    out.insert(out.end(), (u8*)&h, (u8*)&h + 4);
+    out.insert(out.end(), (u8*)&home_wall, (u8*)&home_wall + 8);
+    out.insert(out.end(), home.begin(), home.end());
+    FILE* f = fopen(HomePath().c_str(), "wb");
+    if (!f) return;
+    fwrite(out.data(), 1, out.size(), f);
+    fclose(f);
+  }
+
+  void LoadHome() {
+    auto d = ReadFile(HomePath());
+    if (d.size() < 20 || memcmp(d.data(), "MCPSHOM1", 8) != 0) return;
+    u32 h;
+    memcpy(&h, &d[8], 4);
+    if (h != Fnv(bios_rom)) return;
+    memcpy(&home_wall, &d[12], 8);
+    home.assign(d.begin() + 20, d.end());
+  }
+
+  // No snapshot (a game was already running when this version first started): restart the
+  // unit and do what a person would, quickly: past the greeting, the clock from the PC (5Ch),
+  // then hold Up into setting mode and confirm each field so the kernel counts it as set.
+  void ColdReturn() {
+    m.LoadCard(cardimg);
+    m.Reset();
+    auto press = [&](u8 mask, double hold) { m.SetButtons(mask); m.RunFor(hold); m.SetButtons(0); m.RunFor(0.5); };
+    m.RunFor(1.0);
+    SyncClock();
+    m.RunFor(0.5);
+    press(1 << ps::BTN_ENTER, 0.15);
+    m.RunFor(0.5);
+    press(1 << ps::BTN_UP, 2.0);
+    for (int i = 0; i < 6; i++) press(1 << ps::BTN_ENTER, 0.12);
+    m.RunFor(1.0);
+    SyncClock();
+    in_game = 0;
+    home = m.SaveState();
+    home_wall = (long long)time(nullptr);
+  }
+
+  bool ExitGame() {
+    if (home.empty()) { ColdReturn(); return true; }
+    u32 serial = Serial();
+    if (!m.LoadState(home)) return false;
+    m.sig.serial_lo = serial & 0xFFFF;   // the unit is the same one
+    m.sig.serial_hi = serial >> 16;
+    m.LoadCard(cardimg);
+    AdvanceClock((long long)time(nullptr) - home_wall);
+    home_wall = (long long)time(nullptr);
+    home = m.SaveState();
+    in_game = 0;
+    Rescan();
+    return true;
   }
 
   bool RestoreState() {
@@ -355,6 +451,12 @@ struct App {
     std::transform(ext.begin(), ext.end(), ext.begin(), ::tolower);
     auto size = fs::exists(path) ? fs::file_size(path) : 0;
     if (size == 16384 && (ext == ".bin" || ext == ".rom" || ext == "")) { if (UseBios(path)) Note("BIOS loaded: " + fs::path(path).filename().string()); return; }
+    if (have_bios && InGameNow()) {
+      if (!ExitGame()) {
+        Note("A game is running and there's no saved clock to go back to: press Reset (you'll set the clock again), then drop the file.");
+        return;
+      }
+    }
     if (size == card::SIZE || size == card::SIZE + 3904) {
       // A whole card: it becomes the card in the PocketStation, the old one kept as .bak.
       std::vector<u8> img;
@@ -412,6 +514,7 @@ struct App {
     if (docked && now >= undock_at) { docked = false; m.SetDocked(false); }
     if (clock_sync_at >= 0 && now >= clock_sync_at) { clock_sync_at = -1; SyncClock(); }
     m.RunFor(std::min(dt, 0.1));
+    TrackHome();
     if (state_save_at < 0) state_save_at = now + 30;
     if (now >= state_save_at) { SaveState(); state_save_at = now + 30; }
     if (m.CardDirty()) { cardimg = m.Card(); card_save_at = now + 1.0; }
@@ -518,7 +621,7 @@ struct App {
     ImGui::Dummy(ImVec2(0, 6));
     ImGui::PushStyleColor(ImGuiCol_Text, ColV(TEXT4));
     ImGui::PushTextWrapPos(ImGui::GetCursorPosX() + 260);
-    ImGui::TextUnformatted(games ? "On the clock, Left / Right shows the games on the card; Fire starts the one shown. Hold Fire in a game for its menu."
+    ImGui::TextUnformatted(games ? "On the clock, Left / Right shows the games on the card; Fire starts the one shown. Exit game (F3, or Start on a controller) goes back to the clock."
                                  : "No mini-games on this card yet. Drop a .mcs, .psv or .gme on this window, or load them from the Cards page.");
     ImGui::PopTextWrapPos();
     ImGui::PopStyleColor();
@@ -556,6 +659,11 @@ struct App {
     ImGui::PushStyleColor(ImGuiCol_Button, ImVec4(0, 0, 0, 0));
     ImGui::PushStyleColor(ImGuiCol_Text, ColV(TEXT3));
     if (ImGui::Button("Reset", ImVec2(70 * s, 26 * s)) && have_bios) { m.LoadCard(cardimg); m.Reset(); }
+    if (InGame()) {
+      ImGui::SetCursorScreenPos(ImVec2(x0 + iw - 170 * s, y - 5 * s));
+      if (ImGui::Button("Exit game", ImVec2(96 * s, 26 * s)) && !ExitGame())
+        Note("No saved clock to go back to yet: press Reset to leave the game.");
+    }
     ImGui::PopStyleColor(2);
     y += 34 * s;
 
@@ -932,6 +1040,9 @@ int main(int argc, char** argv) {
         app.pad = nullptr;
       }
       if (e.type == SDL_KEYDOWN && e.key.keysym.scancode == SDL_SCANCODE_F2 && app.have_bios) { app.m.LoadCard(app.cardimg); app.m.Reset(); }
+      if (((e.type == SDL_KEYDOWN && e.key.keysym.scancode == SDL_SCANCODE_F3) ||
+           (e.type == SDL_CONTROLLERBUTTONDOWN && e.cbutton.button == SDL_CONTROLLER_BUTTON_START)) && app.have_bios && app.InGame())
+        if (!app.ExitGame()) app.Note("No saved clock to go back to yet: press Reset to leave the game.");
       if (e.type == SDL_CONTROLLERBUTTONDOWN && e.cbutton.button == SDL_CONTROLLER_BUTTON_BACK && app.have_bios) { app.m.LoadCard(app.cardimg); app.m.Reset(); }
       if (e.type == SDL_CONTROLLERBUTTONDOWN && e.cbutton.button == SDL_CONTROLLER_BUTTON_LEFTSHOULDER) app.page = 0;
       if (e.type == SDL_CONTROLLERBUTTONDOWN && e.cbutton.button == SDL_CONTROLLER_BUTTON_RIGHTSHOULDER) app.page = 1;
