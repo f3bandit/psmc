@@ -22,3 +22,7 @@ android/app/.cxx/
 android/local.properties
 *.apk
 *.keystore
+
+# written by local test runs
+app/*.mcd
+app/mcps.ini
