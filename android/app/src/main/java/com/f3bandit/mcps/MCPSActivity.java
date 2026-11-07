@@ -104,6 +104,33 @@ public class MCPSActivity extends SDLActivity {
         return a == null ? 1.0f : a.getResources().getConfiguration().fontScale;
     }
 
+    // Called from native code: this unit's name on the network (the infrared link).
+    public static String deviceName() {
+        String m = Build.MODEL;
+        return m == null || m.isEmpty() ? "Android" : m;
+    }
+
+    // Called from native code while the Link page looks for units on the network: Android drops
+    // broadcasts unless an app holds this.
+    private static android.net.wifi.WifiManager.MulticastLock multicastLock;
+
+    public static void multicastOn() {
+        MCPSActivity a = (MCPSActivity) mSingleton;
+        if (a == null) return;
+        try {
+            if (multicastLock == null) {
+                android.net.wifi.WifiManager wm = (android.net.wifi.WifiManager) a.getApplicationContext().getSystemService(WIFI_SERVICE);
+                multicastLock = wm.createMulticastLock("mcps-link");
+                multicastLock.setReferenceCounted(false);
+            }
+            multicastLock.acquire();
+        } catch (Exception ignored) { }
+    }
+
+    public static void multicastOff() {
+        try { if (multicastLock != null) multicastLock.release(); } catch (Exception ignored) { }
+    }
+
     // Called from native code: show the system picker for any file.
     public static void pickFile() {
         final MCPSActivity a = (MCPSActivity) mSingleton;

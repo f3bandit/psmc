@@ -11,7 +11,7 @@ set(ROOT ${CMAKE_CURRENT_SOURCE_DIR}/../../..)
 set(IMGUI ${ROOT}/app/third_party/imgui)
 
 add_library(main SHARED
-  ${ROOT}/app/main.cpp ${ROOT}/app/card.cpp ${ROOT}/app/net.cpp ${ROOT}/app/alerts.cpp
+  ${ROOT}/app/main.cpp ${ROOT}/app/card.cpp ${ROOT}/app/net.cpp ${ROOT}/app/alerts.cpp ${ROOT}/app/link.cpp
   ${ROOT}/emu/pocketstation.cpp ${ROOT}/emu/arm/tablegen/tablegen.cc
   ${IMGUI}/imgui.cpp ${IMGUI}/imgui_draw.cpp ${IMGUI}/imgui_tables.cpp ${IMGUI}/imgui_widgets.cpp
   ${IMGUI}/backends/imgui_impl_sdl2.cpp ${IMGUI}/backends/imgui_impl_sdlrenderer2.cpp)

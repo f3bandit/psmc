@@ -7,9 +7,13 @@
     <uses-feature android:name="android.hardware.gamepad" android:required="false" />
     <uses-feature android:name="android.hardware.usb.host" android:required="false" />
     <uses-feature android:name="android.hardware.bluetooth" android:required="false" />
+    <uses-feature android:name="android.hardware.wifi" android:required="false" />
 
     <!-- The network memory card: a console (Phosphor on the SS1) connects to the phone. -->
     <uses-permission android:name="android.permission.INTERNET" />
+    <!-- The infrared link: finding units waiting on the local network (UDP broadcast). -->
+    <uses-permission android:name="android.permission.ACCESS_WIFI_STATE" />
+    <uses-permission android:name="android.permission.CHANGE_WIFI_MULTICAST_STATE" />
     <uses-permission android:name="android.permission.VIBRATE" />
     <!-- Games calling while the app is put away: notifications, and a foreground service so the
          PocketStation keeps running (RunService). -->

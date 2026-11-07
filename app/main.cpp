@@ -27,6 +27,10 @@
 #include "../emu/pocketstation.hpp"
 #include "alerts.hpp"
 #include "card.hpp"
+#include "link.hpp"
+#ifndef _WIN32
+#include <unistd.h>   // gethostname
+#endif
 #include "net.hpp"
 
 #include "fonts/inter_regular.h"
@@ -78,6 +82,27 @@ static void AndroidCallStatic(const char* method, const char* sig, const std::st
   env->DeleteLocalRef(activity);
 }
 
+static std::string AndroidString(const char* method, const char* fallback) {
+  JNIEnv* env = (JNIEnv*)SDL_AndroidGetJNIEnv();
+  jobject activity = (jobject)SDL_AndroidGetActivity();
+  if (!env || !activity) return fallback;
+  jclass cls = env->GetObjectClass(activity);
+  jmethodID mid = env->GetStaticMethodID(cls, method, "()Ljava/lang/String;");
+  std::string v = fallback;
+  if (mid) {
+    jstring js = (jstring)env->CallStaticObjectMethod(cls, mid);
+    if (js) {
+      const char* c = env->GetStringUTFChars(js, nullptr);
+      if (c && *c) v = c;
+      env->ReleaseStringUTFChars(js, c);
+      env->DeleteLocalRef(js);
+    }
+  }
+  env->DeleteLocalRef(cls);
+  env->DeleteLocalRef(activity);
+  return v;
+}
+
 static float AndroidFloat(const char* method, float fallback) {
   JNIEnv* env = (JNIEnv*)SDL_AndroidGetJNIEnv();
   jobject activity = (jobject)SDL_AndroidGetActivity();
@@ -95,7 +120,7 @@ namespace fs = std::filesystem;
 using ps::u8;
 
 static const char* APP_NAME = "MC/PS MemCard Pro";
-static const char* APP_VERSION = "0.1.14";
+static const char* APP_VERSION = "0.1.15";
 #ifdef __ANDROID__
 #define ON_THIS_DEVICE "on this phone"
 #define ON_THIS_DEVICE_CAPS "ON THIS PHONE"
@@ -301,17 +326,17 @@ struct App {
     if (cfg.serial != v) { cfg.serial = v; cfg.Save(); }
   }
   void Bind() {
-    if (cfg.unlock && card::BindApps(cardimg, Serial())) { card::Save(CardPath(), cardimg); m.LoadCard(cardimg); watcher.Reset(); }
+    if (cfg.unlock && card::BindApps(cardimg, Serial())) { card::Save(CardPath(), cardimg); EndLink(); m.LoadCard(cardimg); watcher.Reset(); }
   }
 
   void PowerOn() {
-    m.LoadCard(cardimg); watcher.Reset();
+    EndLink(); m.LoadCard(cardimg); watcher.Reset();
     home.clear();
     LoadHome();
     if (RestoreState()) { GiveSerial(); Bind(); return; }
     GiveSerial();
     Bind();
-    m.LoadCard(cardimg); watcher.Reset();
+    EndLink(); m.LoadCard(cardimg); watcher.Reset();
     m.Reset();
     clock_sync_at = now + 1.0;   // once the kernel has finished starting up
   }
@@ -347,6 +372,7 @@ struct App {
   // Moves the unit's clock on by `secs`, as the crystal would have while the app was closed.
   void AdvanceClock(long long secs) {
     if (secs <= 0) return;
+    EndLink("The link ended: the clock was moved on");
     u32 c = m.rtc.clock, k = m.rtc.calendar;
     int ss = FromBcd(c), mi = FromBcd(c >> 8), hh = FromBcd(c >> 16), dow = (int)(c >> 24 & 7);
     int yy = FromBcd(k >> 16), mo = FromBcd(k >> 8), dd = FromBcd(k);
@@ -393,6 +419,17 @@ struct App {
   bool background = false;           // put away, still running (phones)
   SDL_Window* window = nullptr;
   alerts::Watcher watcher;           // games calling: see alerts.hpp
+  irlink::Link lnk;                  // infrared with another unit over the network: see link.hpp
+  std::string link_name;             // this unit's name on the network
+  char link_ip[64] = "";
+  double link_panel_at = -1;         // the Link panel was last drawn then: look for units meanwhile
+  bool multicast = false;
+  // Anything that changes the unit other than the link itself (a reset, another card, the clock,
+  // the console) would make the two sides' copies differ: it ends the link first.
+  void EndLink(const std::string& why = "The link ended: the unit was reset or its card changed") {
+    if (lnk.Busy()) lnk.Stop(why);
+    m.ir_light = false;
+  }
   double kernel_since = -1;
   std::vector<u8> home;              // the unit at the clock
   std::vector<u8> candidate;         // the next one, until a second later proves it
@@ -456,7 +493,7 @@ struct App {
   // unit and do what a person would, quickly: past the greeting, the clock from the PC (5Ch),
   // then hold Up into setting mode and confirm each field so the kernel counts it as set.
   void ColdReturn() {
-    m.LoadCard(cardimg); watcher.Reset();
+    EndLink(); m.LoadCard(cardimg); watcher.Reset();
     m.Reset();
     auto press = [&](u8 mask, double hold) { m.SetButtons(mask); m.RunFor(hold); m.SetButtons(0); m.RunFor(0.5); };
     m.RunFor(1.0);
@@ -479,7 +516,7 @@ struct App {
     if (!m.LoadState(home)) return false;
     m.sig.serial_lo = serial & 0xFFFF;   // the unit is the same one
     m.sig.serial_hi = serial >> 16;
-    m.LoadCard(cardimg); watcher.Reset();
+    EndLink(); m.LoadCard(cardimg); watcher.Reset();
     AdvanceClock((long long)time(nullptr) - home_wall);
     home_wall = (long long)time(nullptr);
     home = m.SaveState();
@@ -496,7 +533,7 @@ struct App {
     memcpy(&wall, &d[12], 8);
     if (h != Fnv(bios_rom)) return false;   // saved with another BIOS: start fresh
     if (!m.LoadState(std::vector<u8>(d.begin() + 20, d.end()))) return false;
-    m.LoadCard(cardimg); watcher.Reset();
+    EndLink(); m.LoadCard(cardimg); watcher.Reset();
     AdvanceClock((long long)time(nullptr) - wall);
     Rescan();   // the card file may have changed while the app was closed
     return true;
@@ -507,6 +544,7 @@ struct App {
   double clock_sync_at = -1;
   static u8 Bcd(int v) { return (u8)((v / 10) << 4 | (v % 10)); }
   void SyncClock() {
+    EndLink("The link ended: the clock was set");
     time_t tt = time(nullptr);
     tm lt = *localtime(&tt);
     bool was = docked;
@@ -528,6 +566,7 @@ struct App {
   // told, as a console does: the J110 kernel lists the games on the card only at power-on and
   // after it has been docked. So it gets a brief dock with a harmless ID command (53h).
   void Rescan() {
+    EndLink();
     if (!have_bios) return;
     bool was = docked;
     m.SetDocked(true);
@@ -570,7 +609,7 @@ struct App {
       cardimg = img;
       if (cfg.unlock) card::BindApps(cardimg, Serial());
       card::Save(CardPath(), cardimg);
-      m.LoadCard(cardimg); watcher.Reset();
+      EndLink(); m.LoadCard(cardimg); watcher.Reset();
       Rescan();
       Note("Card loaded from " + fs::path(path).filename().string() + " (the previous card is in " + fs::path(CardPath()).filename().string() + ".bak)");
       return;
@@ -582,7 +621,7 @@ struct App {
     cardimg = img;
     if (cfg.unlock) card::BindApps(cardimg, Serial());
     card::Save(CardPath(), cardimg);
-    m.LoadCard(cardimg); watcher.Reset();
+    EndLink(); m.LoadCard(cardimg); watcher.Reset();
     Rescan();
     Note("Added " + fs::path(path).filename().string() + " to the card");
   }
@@ -611,6 +650,77 @@ struct App {
     return b;
   }
 
+  // Android only passes broadcasts (units waiting for a link) to apps that ask.
+  void SetMulticast(bool on) {
+    if (on == multicast) return;
+    multicast = on;
+#ifdef __ANDROID__
+    AndroidCallStatic(on ? "multicastOn" : "multicastOff", "()V");
+#endif
+  }
+
+  // The infrared link panel: wait for a link, pick a unit that's waiting, or type its address.
+  void LinkPanel(float w) {
+    link_panel_at = now;
+    ImGui::BeginGroup();
+    ImGui::PushStyleColor(ImGuiCol_Text, ColV(TEXT3));
+    ImGui::TextUnformatted("INFRARED LINK");
+    ImGui::PopStyleColor();
+    ImGui::Dummy(ImVec2(0, 4));
+    using L = irlink::Link;
+    std::string ip = L::LocalIp();
+    if (lnk.state == L::OFF) {
+      SetMulticast(true);
+      lnk.Discover(now);
+      ImGui::PushStyleColor(ImGuiCol_Text, ColV(TEXT3));
+      ImGui::PushTextWrapPos(ImGui::GetCursorPosX() + w);
+      ImGui::TextWrapped("Link with another PocketStation on your network (a phone or a PC running this app) for games "
+                         "that use infrared: both units run on both sides, so it works like holding them face to face.");
+      ImGui::PopTextWrapPos();
+      ImGui::PopStyleColor();
+      ImGui::Dummy(ImVec2(0, 4));
+      if (!have_bios) ImGui::BeginDisabled();
+      if (ImGui::Button("Wait for a link", ImVec2(w, 40))) lnk.Host(link_name);
+      for (auto& f : lnk.found) {
+        ImGui::PushID(f.ip.c_str());
+        if (ListCard(("Link with " + f.name).c_str(), (f.ip + " · waiting for a link").c_str(), nullptr, false, w)) {
+          strncpy(link_ip, f.ip.c_str(), sizeof link_ip - 1);
+          lnk.Join(f.ip, f.port, link_name);
+        }
+        ImGui::PopID();
+      }
+      if (lnk.found.empty()) {
+        ImGui::PushStyleColor(ImGuiCol_Text, ColV(TEXT4));
+        ImGui::TextUnformatted("No units waiting on the network yet.");
+        ImGui::PopStyleColor();
+      }
+      ImGui::SetNextItemWidth(w - 88);
+      ImGui::InputTextWithHint("##ip", "or its address, e.g. 192.168.1.20", link_ip, sizeof link_ip, ImGuiInputTextFlags_CharsDecimal);
+      ImGui::SameLine(0, 8);
+      if (ImGui::Button("Link", ImVec2(80, 0)) && link_ip[0]) lnk.Join(link_ip, irlink::PORT, link_name);
+      if (!have_bios) ImGui::EndDisabled();
+    } else {
+      SetMulticast(false);
+      lnk.StopDiscovery();
+      std::string sub = lnk.state == L::RUNNING ? (lnk.stalled ? "Waiting for " + lnk.peer_name + "..." : "Infrared shared · " + lnk.peer_ip)
+                        : lnk.state == L::WAITING ? "This unit is " + link_name + (ip.empty() ? "" : " at " + ip)
+                                                  : "Connecting...";
+      ListCard(lnk.status.c_str(), sub.c_str(), nullptr, lnk.state == L::RUNNING, w);
+      if (ImGui::Button(lnk.state == L::RUNNING ? "End link" : "Cancel", ImVec2(w, 40))) lnk.Stop("Link ended");
+    }
+    if (lnk.state == L::OFF && !lnk.status.empty()) {
+      ImGui::PushStyleColor(ImGuiCol_Text, ColV(TEXT4));
+      ImGui::PushTextWrapPos(ImGui::GetCursorPosX() + w);
+      ImGui::TextWrapped("%s", lnk.status.c_str());
+      ImGui::PopTextWrapPos();
+      ImGui::PopStyleColor();
+    }
+    ImGui::PushStyleColor(ImGuiCol_Text, ColV(TEXT4));
+    ImGui::Text("This unit: %s%s%s", link_name.c_str(), ip.empty() ? "" : " · ", ip.c_str());
+    ImGui::PopStyleColor();
+    ImGui::EndGroup();
+  }
+
   // A game is calling: in the app, and as a notification when the app isn't in front.
   void Deliver(const alerts::Alert& a) {
     Note(a.title + ": " + a.text);
@@ -627,8 +737,11 @@ struct App {
     u8 held = Buttons(keys);
     m.SetButtons(held);
     if (docked && now >= undock_at) { docked = false; m.SetDocked(false); }
-    if (clock_sync_at >= 0 && now >= clock_sync_at) { clock_sync_at = -1; SyncClock(); }
-    m.RunFor(std::min(dt, cap));
+    if (clock_sync_at >= 0 && now >= clock_sync_at && !lnk.Busy()) { clock_sync_at = -1; SyncClock(); }
+    if (lnk.Busy()) lnk.Poll(now, m, bios_rom);
+    if (lnk.Running()) lnk.Advance(m, held, SDL_GetTicks64() / 1000.0);    // both units, in step
+    else if (lnk.state != irlink::Link::STARTING) { m.ir_light = false; m.RunFor(std::min(dt, cap)); }
+    if (link_panel_at >= 0 && now - link_panel_at > 0.5) { lnk.StopDiscovery(); link_panel_at = -1; SetMulticast(false); }
     TrackHome();
     if (state_save_at < 0) state_save_at = now + 30;
     if (now >= state_save_at) { SaveState(); state_save_at = now + 30; }
@@ -661,6 +774,7 @@ struct App {
 
   void StartServer() {
     server.card_raw = [this](const std::vector<unsigned char>& tx, bool& complete) {
+      if (lnk.state >= irlink::Link::STARTING) { complete = false; return std::vector<unsigned char>(); }   // busy linking
       if (!docked) { docked = true; m.SetDocked(true); }
       undock_at = now + 3.0;   // back to games 3 s after the console stops talking
       auto r = m.CardCommand(tx);
@@ -939,7 +1053,7 @@ struct App {
     ImGui::SetCursorScreenPos(ImVec2(x0 + iw - 70 * s, y - 5 * s));
     ImGui::PushStyleColor(ImGuiCol_Button, ImVec4(0, 0, 0, 0));
     ImGui::PushStyleColor(ImGuiCol_Text, ColV(TEXT3));
-    if (ImGui::Button("Reset", ImVec2(70 * s, 26 * s)) && have_bios) { m.LoadCard(cardimg); watcher.Reset(); m.Reset(); }
+    if (ImGui::Button("Reset", ImVec2(70 * s, 26 * s)) && have_bios) { EndLink(); m.LoadCard(cardimg); watcher.Reset(); m.Reset(); }
     if (InGame()) {
       ImGui::SetCursorScreenPos(ImVec2(x0 + iw - 170 * s, y - 5 * s));
       if (ImGui::Button("Exit game", ImVec2(96 * s, 26 * s)) && !ExitGame())
@@ -960,8 +1074,10 @@ struct App {
     std::string hint = "Arrows: d-pad      Z / Enter: Fire      ";
     hint += pad ? std::string("Controller: ") + SDL_GameControllerName(pad) : "Controller: plug one in";
 #endif
+    bool linked = lnk.Running();
+    if (linked) hint = (lnk.stalled ? "Infrared link: waiting for " : "Infrared linked with ") + lnk.peer_name;
     ImVec2 hs = ImGui::CalcTextSize(hint.c_str());
-    dl->AddText(ImVec2(c.x - hs.x / 2, bmax.y + 14), Col(TEXT3), hint.c_str());
+    dl->AddText(ImVec2(c.x - hs.x / 2, bmax.y + 14), linked ? Col(ACCENT) : Col(TEXT3), hint.c_str());
   }
 
   // ------------------------------------------------------------------ phones and tablets --
@@ -1171,12 +1287,16 @@ struct App {
     dl->AddText(ImGui::GetFont(), 13, ImVec2(a.x + 16, y + 1), Col(TEXT3), "LED");
     const char* ir = m.IrSending() ? "IR sending" : m.IrListening() ? "IR receiving" : "IR off";
     dl->AddText(ImGui::GetFont(), 13, ImVec2(a.x + 56, y + 1), (m.IrSending() || m.IrListening()) ? Col(ACCENT) : Col(TEXT3), ir);
+    if (lnk.Running()) {
+      std::string l = (lnk.stalled ? "Waiting for " : "Linked · ") + lnk.peer_name;
+      dl->AddText(ImGui::GetFont(), 13, ImVec2(a.x + 56, y + 17), Col(ACCENT), l.c_str());
+    }
     if (docked) dl->AddText(ImGui::GetFont(), 13, ImVec2(a.x + 146, y + 1), Col(ACCENT), "Docked");
     ImGui::PushStyleVar(ImGuiStyleVar_FramePadding, ImVec2(10, 4));
     ImGui::PushStyleColor(ImGuiCol_Button, ImVec4(0, 0, 0, 0));
     float bx = a.x + w - 64;
     ImGui::SetCursorScreenPos(ImVec2(bx, a.y + 2));
-    if (ImGui::Button("Reset", ImVec2(64, 30)) && have_bios) { m.LoadCard(cardimg); watcher.Reset(); m.Reset(); }
+    if (ImGui::Button("Reset", ImVec2(64, 30)) && have_bios) { EndLink(); m.LoadCard(cardimg); watcher.Reset(); m.Reset(); }
     if (InGame()) {
       ImGui::SetCursorScreenPos(ImVec2(bx - 98, a.y + 2));
       if (ImGui::Button("Exit game", ImVec2(90, 30)) && !ExitGame())
@@ -1194,15 +1314,9 @@ struct App {
     ImGui::PopStyleColor();
     ImGui::Dummy(ImVec2(0, 4));
     ListCard(chip.c_str(), "A console running Phosphor (SS1) uses this phone as its memory card.",
-             ("Port " + std::to_string(server.port) + " · the unit docks while the console talks to it").c_str(), server.Connected(), w);
+             ("Port " + std::to_string(cfg.port) + " · the unit docks while the console talks to it").c_str(), server.Connected(), w);
     ImGui::Dummy(ImVec2(0, 12));
-    ImGui::PushStyleColor(ImGuiCol_Text, ColV(TEXT3));
-    ImGui::TextUnformatted("INFRARED");
-    ImGui::PopStyleColor();
-    ImGui::Dummy(ImVec2(0, 4));
-    const char* ir = m.IrSending() ? "Sending" : m.IrListening() ? "Listening" : "Off";
-    ListCard((std::string("Infrared: ") + ir).c_str(), "Games that swap data between two units (MGS IDs and others).",
-             "Linking two phones over Bluetooth is coming in a later version.", false, w);
+    LinkPanel(w);
     ImGui::EndGroup();
   }
 
@@ -1273,6 +1387,10 @@ struct App {
       std::string f = OpenFileDialog("PocketStation BIOS (16 KB)", "*.bin;*.rom");
       if (!f.empty()) Open(f);
     }
+#if !defined(__ANDROID__) && !defined(MCPS_PHONE_LAYOUT)
+    ImGui::Dummy(ImVec2(0, 16));
+    LinkPanel(sw);   // phones have it on their Link page
+#endif
     ImGui::EndGroup();
   }
 
@@ -1428,6 +1546,8 @@ int main(int argc, char** argv) {
   bool keep_state = false;
   struct ScriptPress { int frame, mask, frames; };
   std::vector<ScriptPress> presses;
+  bool link_host = false;
+  std::string link_join;
   struct ScriptDrag { int frame, x, y0, y1, frames; };   // a finger, for headless checks
   std::vector<ScriptDrag> drags;
   for (int i = 1; i < argc; i++) {
@@ -1438,6 +1558,8 @@ int main(int argc, char** argv) {
     else if (a == "--bios" && i + 1 < argc) bios_arg = argv[++i];
     else if (a == "--card" && i + 1 < argc) card_arg = argv[++i];
     else if (a == "--keep-state") keep_state = true;
+    else if (a == "--link-host") link_host = true;                          // headless checks
+    else if (a == "--link-join" && i + 1 < argc) link_join = argv[++i];
     else if (a == "--drop" && i + 1 < argc) drops.push_back(argv[++i]);
     else if (a == "--press" && i + 1 < argc) {   // FRAME:MASK:FRAMES, for headless checks
       int f = 0, mk = 0, n = 0;
@@ -1519,6 +1641,19 @@ int main(int argc, char** argv) {
   SDL_free(base);
 #endif
   app.cfg.Load(app.dir + "mcps.ini");
+  {
+    // This unit's name on the network: the phone's model or the PC's name.
+#ifdef __ANDROID__
+    app.link_name = AndroidString("deviceName", "Android");
+#elif defined(_WIN32)
+    const char* n = getenv("COMPUTERNAME");
+    app.link_name = n ? n : "PC";
+#else
+    char n[128] = "";
+    gethostname(n, sizeof n - 1);
+    app.link_name = n[0] ? n : "PC";
+#endif
+  }
   if (!card_arg.empty()) app.cfg.card = card_arg;
   app.LoadCardFile();
   if (app.cfg.path.size() && !fs::exists(app.cfg.path)) app.cfg.Save();
@@ -1548,6 +1683,8 @@ int main(int argc, char** argv) {
   app.audio = SDL_OpenAudioDevice(nullptr, 0, &want, &got, 0);
   if (app.audio) SDL_PauseAudioDevice(app.audio, 0);
   app.StartServer();
+  if (link_host) app.lnk.Host(app.link_name);
+  if (!link_join.empty()) app.lnk.Join(link_join, irlink::PORT, app.link_name);
 
   auto last = std::chrono::steady_clock::now();
   bool run = true;
@@ -1578,12 +1715,12 @@ int main(int argc, char** argv) {
         SDL_GameControllerClose(app.pad);
         app.pad = nullptr;
       }
-      if (e.type == SDL_KEYDOWN && e.key.keysym.scancode == SDL_SCANCODE_F2 && app.have_bios) { app.m.LoadCard(app.cardimg); app.m.Reset(); }
+      if (e.type == SDL_KEYDOWN && e.key.keysym.scancode == SDL_SCANCODE_F2 && app.have_bios) { app.EndLink(); app.m.LoadCard(app.cardimg); app.m.Reset(); }
       if (e.type == SDL_KEYDOWN && e.key.keysym.scancode == SDL_SCANCODE_M && !ImGui::GetIO().WantTextInput) app.ToggleMute();
       if (((e.type == SDL_KEYDOWN && e.key.keysym.scancode == SDL_SCANCODE_F3) ||
            (e.type == SDL_CONTROLLERBUTTONDOWN && e.cbutton.button == SDL_CONTROLLER_BUTTON_START)) && app.have_bios && app.InGame())
         if (!app.ExitGame()) app.Note("No saved clock to go back to yet: press Reset to leave the game.");
-      if (e.type == SDL_CONTROLLERBUTTONDOWN && e.cbutton.button == SDL_CONTROLLER_BUTTON_BACK && app.have_bios) { app.m.LoadCard(app.cardimg); app.m.Reset(); }
+      if (e.type == SDL_CONTROLLERBUTTONDOWN && e.cbutton.button == SDL_CONTROLLER_BUTTON_BACK && app.have_bios) { app.EndLink(); app.m.LoadCard(app.cardimg); app.m.Reset(); }
       if (e.type == SDL_CONTROLLERBUTTONDOWN && e.cbutton.button == SDL_CONTROLLER_BUTTON_LEFTSHOULDER) app.page = 0;
       if (e.type == SDL_CONTROLLERBUTTONDOWN && e.cbutton.button == SDL_CONTROLLER_BUTTON_RIGHTSHOULDER) app.page = 1;
     }
@@ -1661,6 +1798,11 @@ int main(int argc, char** argv) {
       for (auto& n : notes) app.Note(n);
     }
 #endif
+#ifdef __ANDROID__
+    // The on-screen keyboard while a text field (the link address) has the focus.
+    if (io.WantTextInput && !SDL_IsTextInputActive()) SDL_StartTextInput();
+    else if (!io.WantTextInput && SDL_IsTextInputActive()) SDL_StopTextInput();
+#endif
     ImGui::NewFrame();
     app.Frame();
     ImGui::Render();
@@ -1681,6 +1823,7 @@ int main(int argc, char** argv) {
   }
 
   if (app.card_save_at >= 0) card::Save(app.CardPath(), app.cardimg);
+  if (link_host || !link_join.empty()) fprintf(stderr, "link: %s\n", app.lnk.status.c_str());
   if (shot.empty() || keep_state) app.SaveState();
   app.server.Close();
   ImGui_ImplSDLRenderer2_Shutdown();
