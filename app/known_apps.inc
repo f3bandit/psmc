@@ -119,4 +119,5 @@ static const struct { const char* code; const char* name; } KNOWN_CODES[] = {
     {"TICTACP-TTT", "Tic-Tac-Toe"},
     {"pksokoP-SOKO", "Pocket Sokoban"},
     {"BISCPSP10076", "Pocket MuuMuu"},
+    {"BASLUSP00892", "Chocobo World"},
 };

@@ -42,6 +42,16 @@ bool IsChocobo(const card::Entry& e) {
 
 }  // namespace
 
+std::string DisplayName(const card::Entry& e) {
+  if (e.pocketstation) return GameName(e);
+  // A save: its game's name when the game's PocketStation app is a known one (same product code,
+  // 'P' where the save has its hyphen), else the save's own title.
+  std::string code = e.product.substr(0, 12);
+  if (code.size() == 12 && code[6] == '-') code[6] = 'P';
+  for (auto& k : KNOWN_CODES) if (code == k.code) return std::string(k.name) + " save";
+  return e.title;
+}
+
 std::string GameName(const card::Entry& e) {
   std::string p = e.product;
   while (!p.empty() && p.back() == ' ') p.pop_back();

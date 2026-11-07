@@ -76,13 +76,25 @@ static void AndroidCallStatic(const char* method, const char* sig, const std::st
   env->DeleteLocalRef(cls);
   env->DeleteLocalRef(activity);
 }
+
+static float AndroidFloat(const char* method, float fallback) {
+  JNIEnv* env = (JNIEnv*)SDL_AndroidGetJNIEnv();
+  jobject activity = (jobject)SDL_AndroidGetActivity();
+  if (!env || !activity) return fallback;
+  jclass cls = env->GetObjectClass(activity);
+  jmethodID mid = env->GetStaticMethodID(cls, method, "()F");
+  float v = mid ? env->CallStaticFloatMethod(cls, mid) : fallback;
+  env->DeleteLocalRef(cls);
+  env->DeleteLocalRef(activity);
+  return v > 0 ? v : fallback;
+}
 #endif
 
 namespace fs = std::filesystem;
 using ps::u8;
 
 static const char* APP_NAME = "MC/PS MemCard Pro";
-static const char* APP_VERSION = "0.1.12";
+static const char* APP_VERSION = "0.1.13";
 #ifdef __ANDROID__
 #define ON_THIS_DEVICE "on this phone"
 #define ON_THIS_DEVICE_CAPS "ON THIS PHONE"
@@ -767,7 +779,7 @@ struct App {
       snprintf(sub, sizeof sub, "block %d%s · %d block%s%s", e.first_block, e.blocks > 1 ? ("-" + std::to_string(e.first_block + e.blocks - 1)).c_str() : "",
                e.blocks, e.blocks == 1 ? "" : "s", e.mcx1 ? " · resumable" : "");
       ImGui::PushID(e.first_block);
-      if (ListCard(e.title.c_str(), sub, e.product.c_str(), selected == e.first_block, lw)) selected = e.first_block;
+      if (ListCard(alerts::DisplayName(e).c_str(), sub, e.product.c_str(), selected == e.first_block, lw)) selected = e.first_block;
       ImGui::PopID();
     }
     ListCard("Clock", "Built in", nullptr, false, lw);
@@ -784,6 +796,82 @@ struct App {
     ImGui::PopTextWrapPos();
     ImGui::PopStyleColor();
     ImGui::EndGroup();
+  }
+
+  // The screen: 32x32, a gap between pixels like the real glass. Without a BIOS, where to get one.
+  void Lcd(ImDrawList* dl, ImVec2 at, float iw, float s) {
+    float x0 = at.x, y = at.y;
+    ImVec2 smin(x0, y), smax(x0 + iw, y + iw);
+    dl->AddRectFilled(smin, smax, Col(LCD_BG), 6 * s);
+    if (have_bios) {
+      u8 px[32][32];
+      m.Frame(px);
+      float cell = (iw - 24 * s) / 32, gap = std::max(1.0f, cell * 0.08f);
+      for (int py = 0; py < 32; py++)
+        for (int pxx = 0; pxx < 32; pxx++)
+          if (px[py][pxx]) {
+            ImVec2 a(smin.x + 12 * s + pxx * cell, smin.y + 12 * s + py * cell);
+            dl->AddRectFilled(a, ImVec2(a.x + cell - gap, a.y + cell - gap), Col(LCD_PX));
+          }
+    } else {
+      const char* t1 = "Drop your PocketStation BIOS here";
+      const char* t2 = "16 KB, dumped from your own unit";
+      ImVec2 s1 = font_bold->CalcTextSizeA(18 * s, FLT_MAX, 0, t1), s2 = ImGui::GetFont()->CalcTextSizeA(14 * s, FLT_MAX, 0, t2);
+      dl->AddText(font_bold, 18 * s, ImVec2(smin.x + (iw - s1.x) / 2, smin.y + iw / 2 - 40 * s), Col(LCD_PX), t1);
+      dl->AddText(ImGui::GetFont(), 14 * s, ImVec2(smin.x + (iw - s2.x) / 2, smin.y + iw / 2 - 12 * s), Col(0x4a4c3e), t2);
+      ImGui::SetCursorScreenPos(ImVec2(smin.x + iw / 2 - 70 * s, smin.y + iw / 2 + 20 * s));
+      ImGui::PushStyleColor(ImGuiCol_Button, ColV(LCD_PX));
+      ImGui::PushStyleColor(ImGuiCol_Text, ColV(LCD_BG));
+      if (ImGui::Button("Choose file...", ImVec2(140 * s, 34 * s))) {
+        std::string f = OpenFileDialog("PocketStation BIOS (16 KB)", "*.bin;*.rom");
+        if (!f.empty()) Open(f);
+      }
+      ImGui::PopStyleColor(2);
+    }
+  }
+
+  // D-pad on the left and Fire on the right of a row `iw` wide, clickable and touchable.
+  void Controls(ImDrawList* dl, ImVec2 at, float iw, float s, float dp, float fr) {
+    float x0 = at.x, y = at.y;
+    mouse_buttons = 0;
+    ImVec2 dc(x0 + 24 * s + dp / 2, y + dp / 2);
+    float arm = dp / 2, half = dp * 0.17f;
+    unsigned pad_col = 0x2a2a31;
+    dl->AddRectFilled(ImVec2(dc.x - half, dc.y - arm), ImVec2(dc.x + half, dc.y + arm), Col(pad_col), 4 * s);
+    dl->AddRectFilled(ImVec2(dc.x - arm, dc.y - half), ImVec2(dc.x + arm, dc.y + half), Col(pad_col), 4 * s);
+    struct Dir { int btn; ImVec2 a, b; } dirs[4] = {
+      {ps::BTN_UP, ImVec2(dc.x - half, dc.y - arm), ImVec2(dc.x + half, dc.y - half)},
+      {ps::BTN_DOWN, ImVec2(dc.x - half, dc.y + half), ImVec2(dc.x + half, dc.y + arm)},
+      {ps::BTN_LEFT, ImVec2(dc.x - arm, dc.y - half), ImVec2(dc.x - half, dc.y + half)},
+      {ps::BTN_RIGHT, ImVec2(dc.x + half, dc.y - half), ImVec2(dc.x + arm, dc.y + half)},
+    };
+    u8 held = have_bios ? m.buttons : 0;
+    for (auto& d : dirs) {
+      ImGui::SetCursorScreenPos(d.a);
+      ImGui::PushID(d.btn);
+      ImGui::InvisibleButton("dir", ImVec2(d.b.x - d.a.x, d.b.y - d.a.y));
+      if (ImGui::IsItemActive()) mouse_buttons |= 1 << d.btn;
+      ImGui::PopID();
+      if (held & (1 << d.btn)) dl->AddRectFilled(d.a, d.b, Col(0x45454f), 4 * s);
+      ImVec2 m2((d.a.x + d.b.x) / 2, (d.a.y + d.b.y) / 2);
+      float t = 7 * s;
+      switch (d.btn) {
+        case ps::BTN_UP: dl->AddTriangleFilled(ImVec2(m2.x, m2.y - t), ImVec2(m2.x - t, m2.y + t * 0.6f), ImVec2(m2.x + t, m2.y + t * 0.6f), Col(0x5c5a57)); break;
+        case ps::BTN_DOWN: dl->AddTriangleFilled(ImVec2(m2.x, m2.y + t), ImVec2(m2.x + t, m2.y - t * 0.6f), ImVec2(m2.x - t, m2.y - t * 0.6f), Col(0x5c5a57)); break;
+        case ps::BTN_LEFT: dl->AddTriangleFilled(ImVec2(m2.x - t, m2.y), ImVec2(m2.x + t * 0.6f, m2.y + t), ImVec2(m2.x + t * 0.6f, m2.y - t), Col(0x5c5a57)); break;
+        case ps::BTN_RIGHT: dl->AddTriangleFilled(ImVec2(m2.x + t, m2.y), ImVec2(m2.x - t * 0.6f, m2.y - t), ImVec2(m2.x - t * 0.6f, m2.y + t), Col(0x5c5a57)); break;
+      }
+    }
+    dl->AddCircleFilled(dc, 9 * s, Col(0x222227));
+    // Fire, centred on the d-pad's row.
+    ImVec2 fc(x0 + iw - 24 * s - fr, dc.y);
+    ImGui::SetCursorScreenPos(ImVec2(fc.x - fr, fc.y - fr));
+    ImGui::InvisibleButton("fire", ImVec2(fr * 2, fr * 2));
+    if (ImGui::IsItemActive()) mouse_buttons |= 1 << ps::BTN_ENTER;
+    bool fire = held & (1 << ps::BTN_ENTER);
+    dl->AddCircleFilled(fc, fr, Col(fire ? 0xd99236 : ACCENT));
+    ImVec2 ft = font_bold->CalcTextSizeA(16 * s, FLT_MAX, 0, "Fire");
+    dl->AddText(font_bold, 16 * s, ImVec2(fc.x - ft.x / 2, fc.y - ft.y / 2), Col(BG), "Fire");
   }
 
   void UnitPanel() {
@@ -825,78 +913,10 @@ struct App {
     ImGui::PopStyleColor(2);
     y += 34 * s;
 
-    // The screen: 32x32, a gap between pixels like the real glass.
-    ImVec2 smin(x0, y), smax(x0 + iw, y + iw);
-    dl->AddRectFilled(smin, smax, Col(LCD_BG), 6 * s);
-    if (have_bios) {
-      u8 px[32][32];
-      m.Frame(px);
-      float cell = (iw - 24 * s) / 32, gap = std::max(1.0f, cell * 0.08f);
-      for (int py = 0; py < 32; py++)
-        for (int pxx = 0; pxx < 32; pxx++)
-          if (px[py][pxx]) {
-            ImVec2 a(smin.x + 12 * s + pxx * cell, smin.y + 12 * s + py * cell);
-            dl->AddRectFilled(a, ImVec2(a.x + cell - gap, a.y + cell - gap), Col(LCD_PX));
-          }
-    } else {
-      const char* t1 = "Drop your PocketStation BIOS here";
-      const char* t2 = "16 KB, dumped from your own unit";
-      ImVec2 s1 = font_bold->CalcTextSizeA(18 * s, FLT_MAX, 0, t1), s2 = ImGui::GetFont()->CalcTextSizeA(14 * s, FLT_MAX, 0, t2);
-      dl->AddText(font_bold, 18 * s, ImVec2(smin.x + (iw - s1.x) / 2, smin.y + iw / 2 - 40 * s), Col(LCD_PX), t1);
-      dl->AddText(ImGui::GetFont(), 14 * s, ImVec2(smin.x + (iw - s2.x) / 2, smin.y + iw / 2 - 12 * s), Col(0x4a4c3e), t2);
-      ImGui::SetCursorScreenPos(ImVec2(smin.x + iw / 2 - 70 * s, smin.y + iw / 2 + 20 * s));
-      ImGui::PushStyleColor(ImGuiCol_Button, ColV(LCD_PX));
-      ImGui::PushStyleColor(ImGuiCol_Text, ColV(LCD_BG));
-      if (ImGui::Button("Choose file...", ImVec2(140 * s, 34 * s))) {
-        std::string f = OpenFileDialog("PocketStation BIOS (16 KB)", "*.bin;*.rom");
-        if (!f.empty()) Open(f);
-      }
-      ImGui::PopStyleColor(2);
-    }
+    Lcd(dl, ImVec2(x0, y), iw, s);
     y += iw + 30 * s;
 
-    // D-pad and Fire, clickable.
-    mouse_buttons = 0;
-    float dp = 120 * s;
-    ImVec2 dc(x0 + 24 * s + dp / 2, y + dp / 2);
-    float arm = dp / 2, half = dp * 0.17f;
-    unsigned pad_col = 0x2a2a31;
-    dl->AddRectFilled(ImVec2(dc.x - half, dc.y - arm), ImVec2(dc.x + half, dc.y + arm), Col(pad_col), 4 * s);
-    dl->AddRectFilled(ImVec2(dc.x - arm, dc.y - half), ImVec2(dc.x + arm, dc.y + half), Col(pad_col), 4 * s);
-    struct Dir { int btn; ImVec2 a, b; } dirs[4] = {
-      {ps::BTN_UP, ImVec2(dc.x - half, dc.y - arm), ImVec2(dc.x + half, dc.y - half)},
-      {ps::BTN_DOWN, ImVec2(dc.x - half, dc.y + half), ImVec2(dc.x + half, dc.y + arm)},
-      {ps::BTN_LEFT, ImVec2(dc.x - arm, dc.y - half), ImVec2(dc.x - half, dc.y + half)},
-      {ps::BTN_RIGHT, ImVec2(dc.x + half, dc.y - half), ImVec2(dc.x + arm, dc.y + half)},
-    };
-    u8 held = have_bios ? m.buttons : 0;
-    for (auto& d : dirs) {
-      ImGui::SetCursorScreenPos(d.a);
-      ImGui::PushID(d.btn);
-      ImGui::InvisibleButton("dir", ImVec2(d.b.x - d.a.x, d.b.y - d.a.y));
-      if (ImGui::IsItemActive()) mouse_buttons |= 1 << d.btn;
-      ImGui::PopID();
-      if (held & (1 << d.btn)) dl->AddRectFilled(d.a, d.b, Col(0x45454f), 4 * s);
-      ImVec2 m2((d.a.x + d.b.x) / 2, (d.a.y + d.b.y) / 2);
-      float t = 7 * s;
-      switch (d.btn) {
-        case ps::BTN_UP: dl->AddTriangleFilled(ImVec2(m2.x, m2.y - t), ImVec2(m2.x - t, m2.y + t * 0.6f), ImVec2(m2.x + t, m2.y + t * 0.6f), Col(0x5c5a57)); break;
-        case ps::BTN_DOWN: dl->AddTriangleFilled(ImVec2(m2.x, m2.y + t), ImVec2(m2.x + t, m2.y - t * 0.6f), ImVec2(m2.x - t, m2.y - t * 0.6f), Col(0x5c5a57)); break;
-        case ps::BTN_LEFT: dl->AddTriangleFilled(ImVec2(m2.x - t, m2.y), ImVec2(m2.x + t * 0.6f, m2.y + t), ImVec2(m2.x + t * 0.6f, m2.y - t), Col(0x5c5a57)); break;
-        case ps::BTN_RIGHT: dl->AddTriangleFilled(ImVec2(m2.x + t, m2.y), ImVec2(m2.x - t * 0.6f, m2.y - t), ImVec2(m2.x - t * 0.6f, m2.y + t), Col(0x5c5a57)); break;
-      }
-    }
-    dl->AddCircleFilled(dc, 9 * s, Col(0x222227));
-    // Fire, centred on the d-pad's row.
-    float fr = 42 * s;
-    ImVec2 fc(x0 + iw - 24 * s - fr, dc.y);
-    ImGui::SetCursorScreenPos(ImVec2(fc.x - fr, fc.y - fr));
-    ImGui::InvisibleButton("fire", ImVec2(fr * 2, fr * 2));
-    if (ImGui::IsItemActive()) mouse_buttons |= 1 << ps::BTN_ENTER;
-    bool fire = held & (1 << ps::BTN_ENTER);
-    dl->AddCircleFilled(fc, fr, Col(fire ? 0xd99236 : ACCENT));
-    ImVec2 ft = font_bold->CalcTextSizeA(16 * s, FLT_MAX, 0, "Fire");
-    dl->AddText(font_bold, 16 * s, ImVec2(fc.x - ft.x / 2, fc.y - ft.y / 2), Col(BG), "Fire");
+    Controls(dl, ImVec2(x0, y), iw, s, 120 * s, 42 * s);
 
     // Key hints under the unit.
 #ifdef __ANDROID__
@@ -907,6 +927,248 @@ struct App {
 #endif
     ImVec2 hs = ImGui::CalcTextSize(hint.c_str());
     dl->AddText(ImVec2(c.x - hs.x / 2, bmax.y + 14), Col(TEXT3), hint.c_str());
+  }
+
+  // ------------------------------------------------------------------ phones and tablets --
+  // Laid out in dp as SS1 Tool for Android is: a 56 dp app bar, the page, and a 72 dp bottom
+  // navigation on phones; at 600 dp wide and up (tablets, phones turned sideways) an 88 dp
+  // navigation rail on the left instead. The status and navigation bars stay (styles.xml).
+  static constexpr float APPBAR = 56, BOTTOMNAV = 72, RAIL = 88;
+  enum { PAGE_PLAY = 0, PAGE_CARDS = 1, PAGE_GAMES = 2, PAGE_LINK = 3 };
+
+  bool Wide() const { return ImGui::GetIO().DisplaySize.x >= 600; }
+
+  // Nav icons, drawn in a 24-unit box like the mockup's SVGs.
+  void NavIcon(ImDrawList* dl, int pg, ImVec2 o, float sz, ImU32 c) {
+    float k = sz / 24, w = 1.8f * k;
+    auto P = [&](float x, float y) { return ImVec2(o.x + x * k, o.y + y * k); };
+    switch (pg) {
+      case PAGE_PLAY:   // the unit: body, screen, d-pad
+        dl->AddRect(P(6, 2.5f), P(18, 21.5f), c, 3 * k, 0, w);
+        dl->AddRect(P(8.5f, 5), P(15.5f, 11), c, 1 * k, 0, w);
+        dl->AddCircle(P(14.5f, 16.5f), 1.6f * k, c, 0, w);
+        dl->AddLine(P(8.5f, 16.5f), P(11.5f, 16.5f), c, w);
+        dl->AddLine(P(10, 15), P(10, 18), c, w);
+        break;
+      case PAGE_GAMES:  // a list
+        dl->AddRect(P(3.5f, 4), P(20.5f, 9), c, 1.5f * k, 0, w);
+        dl->AddRect(P(3.5f, 11), P(20.5f, 16), c, 1.5f * k, 0, w);
+        dl->AddLine(P(3.5f, 19.5f), P(14.5f, 19.5f), c, w);
+        break;
+      case PAGE_CARDS: {  // a card with its label
+        ImVec2 pts[5] = {P(6, 3), P(15, 3), P(19, 7), P(19, 21), P(6, 21)};
+        dl->AddPolyline(pts, 5, c, ImDrawFlags_Closed, w);
+        dl->AddLine(P(9, 14), P(16, 14), c, w);
+        dl->AddLine(P(9, 17.5f), P(16, 17.5f), c, w);
+        break;
+      }
+      case PAGE_LINK: {  // Bluetooth
+        ImVec2 pts[6] = {P(7, 7), P(17, 17), P(12, 21), P(12, 3), P(17, 7), P(7, 17)};
+        dl->AddPolyline(pts, 6, c, 0, w);
+        break;
+      }
+    }
+  }
+
+  void NavButton(int pg, const char* label, ImVec2 a, ImVec2 b) {
+    auto* dl = ImGui::GetWindowDrawList();
+    ImGui::SetCursorScreenPos(a);
+    ImGui::PushID(pg);
+    if (ImGui::InvisibleButton("nav", ImVec2(b.x - a.x, b.y - a.y))) page = pg;
+    ImGui::PopID();
+    bool on = page == pg;
+    float cx = (a.x + b.x) / 2, cy = (a.y + b.y) / 2;
+    ImVec2 pa(cx - 28, cy - 22), pb(cx + 28, cy + 8);   // the 56x30 pill around the icon
+    if (on) dl->AddRectFilled(pa, pb, Col(0x3a2a12), 15);
+    NavIcon(dl, pg, ImVec2(cx - 11, cy - 18), 22, on ? Col(ACCENT) : Col(TEXT3));
+    ImVec2 ts = ImGui::GetFont()->CalcTextSizeA(12, FLT_MAX, 0, label);
+    dl->AddText(on ? font_bold : ImGui::GetFont(), 12, ImVec2(cx - ts.x / 2, cy + 12), on ? Col(TEXT) : Col(TEXT3), label);
+  }
+
+  void MobileFrame() {
+    ImGuiViewport* vp = ImGui::GetMainViewport();
+    ImGui::SetNextWindowPos(vp->Pos);
+    ImGui::SetNextWindowSize(vp->Size);
+    ImGui::PushStyleVar(ImGuiStyleVar_WindowPadding, ImVec2(0, 0));
+    ImGui::Begin("main", nullptr, ImGuiWindowFlags_NoDecoration | ImGuiWindowFlags_NoMove | ImGuiWindowFlags_NoBringToFrontOnFocus |
+                                      ImGuiWindowFlags_NoSavedSettings | ImGuiWindowFlags_NoScrollWithMouse);
+    ImGui::PopStyleVar();
+    auto* dl = ImGui::GetWindowDrawList();
+    ImVec2 o = ImGui::GetWindowPos();
+    float W = vp->Size.x, H = vp->Size.y;
+    bool wide = Wide();
+    if (page > PAGE_LINK) page = PAGE_PLAY;
+
+    // App bar: the name, how the network card stands, mute.
+    dl->AddRectFilled(o, ImVec2(o.x + W, o.y + APPBAR), Col(PANEL));
+    dl->AddLine(ImVec2(o.x, o.y + APPBAR), ImVec2(o.x + W, o.y + APPBAR), Col(0x000000, 100));
+    dl->AddText(font_bold, 17, ImVec2(o.x + 16, o.y + 9), Col(ACCENT), "POCKETSTATION");
+    std::string chip;
+    unsigned dot;
+    if (!server.Listening()) { chip = "Network card off"; dot = TEXT4; }
+    else if (docked) { chip = "Docked · " + server.Peer(); dot = ACCENT; }
+    else if (server.Connected()) { chip = "SS1 connected · " + server.Peer(); dot = GOOD; }
+    else { chip = "Network card · port " + std::to_string(server.port); dot = TEXT4; }
+    dl->AddCircleFilled(ImVec2(o.x + 19, o.y + 38), 3.5f, Col(dot));
+    dl->AddText(ImGui::GetFont(), 12, ImVec2(o.x + 28, o.y + 31), Col(TEXT3), chip.c_str());
+    {
+      // Mute: a speaker, struck through when muted.
+      ImVec2 c(o.x + W - 32, o.y + APPBAR / 2);
+      ImGui::SetCursorScreenPos(ImVec2(c.x - 24, c.y - 24));
+      if (ImGui::InvisibleButton("mute", ImVec2(48, 48))) ToggleMute();
+      ImU32 col = cfg.mute ? Col(ACCENT) : (now < speaker_until ? Col(TEXT) : Col(TEXT3));
+      ImVec2 sp[6] = {ImVec2(c.x - 9, c.y - 3), ImVec2(c.x - 5, c.y - 3), ImVec2(c.x, c.y - 8), ImVec2(c.x, c.y + 8), ImVec2(c.x - 5, c.y + 3), ImVec2(c.x - 9, c.y + 3)};
+      dl->AddPolyline(sp, 6, col, ImDrawFlags_Closed, 1.8f);
+      if (cfg.mute) {
+        dl->AddLine(ImVec2(c.x + 4, c.y - 4), ImVec2(c.x + 10, c.y + 4), col, 1.8f);
+        dl->AddLine(ImVec2(c.x + 10, c.y - 4), ImVec2(c.x + 4, c.y + 4), col, 1.8f);
+      } else {
+        dl->PathArcTo(c, 6, -0.9f, 0.9f, 8);
+        dl->PathStroke(col, 0, 1.8f);
+        dl->PathArcTo(c, 10, -0.9f, 0.9f, 10);
+        dl->PathStroke(col, 0, 1.8f);
+      }
+    }
+
+    // Navigation: bottom bar on phones, rail on wide screens.
+    struct Tab { int pg; const char* label; } tabs[4] = {{PAGE_PLAY, "Play"}, {PAGE_GAMES, "Games"}, {PAGE_CARDS, "Cards"}, {PAGE_LINK, "Link"}};
+    ImVec2 ca, cb;   // the page's area
+    if (wide) {
+      dl->AddRectFilled(ImVec2(o.x, o.y + APPBAR), ImVec2(o.x + RAIL, o.y + H), Col(PANEL));
+      dl->AddLine(ImVec2(o.x + RAIL, o.y + APPBAR), ImVec2(o.x + RAIL, o.y + H), Col(0x000000, 100));
+      for (int i = 0; i < 4; i++) {
+        float y = o.y + APPBAR + 12 + i * 72;
+        NavButton(tabs[i].pg, tabs[i].label, ImVec2(o.x, y), ImVec2(o.x + RAIL, y + 64));
+      }
+      ca = ImVec2(RAIL, APPBAR);
+      cb = ImVec2(W, H);
+    } else {
+      dl->AddRectFilled(ImVec2(o.x, o.y + H - BOTTOMNAV), ImVec2(o.x + W, o.y + H), Col(PANEL));
+      dl->AddLine(ImVec2(o.x, o.y + H - BOTTOMNAV), ImVec2(o.x + W, o.y + H - BOTTOMNAV), Col(0x000000, 100));
+      float tw = (W - 8) / 4;
+      for (int i = 0; i < 4; i++)
+        NavButton(tabs[i].pg, tabs[i].label, ImVec2(o.x + 4 + i * tw, o.y + H - BOTTOMNAV), ImVec2(o.x + 4 + (i + 1) * tw, o.y + H));
+      ca = ImVec2(0, APPBAR);
+      cb = ImVec2(W, H - BOTTOMNAV);
+    }
+
+    ImGui::SetCursorPos(ImVec2(ca.x, ca.y + 1));
+    ImVec2 cs(cb.x - ca.x, cb.y - ca.y - 1);
+    ImGui::BeginChild("page", cs, ImGuiChildFlags_None, page == PAGE_PLAY ? ImGuiWindowFlags_NoScrollbar | ImGuiWindowFlags_NoScrollWithMouse : 0);
+    float pad = wide ? 24 : 12, cw = std::min(cs.x - 2 * pad, 960.0f), cx = (cs.x - cw) / 2;
+    switch (page) {
+      case PAGE_PLAY: MobilePlay(cs, wide); break;
+      case PAGE_GAMES:
+        ImGui::SetCursorPos(ImVec2(cx, 12));
+        GameList(cw);
+        ImGui::Dummy(ImVec2(0, 24));
+        DragScroll();
+        break;
+      case PAGE_CARDS:
+        ImGui::SetCursorPos(ImVec2(cx, 12));
+        CardMain(cw, wide ? 5 : 3, true);
+        ImGui::Dummy(ImVec2(0, 12));
+        ImGui::SetCursorPosX(cx);
+        CardSide(cw);
+        ImGui::Dummy(ImVec2(0, 24));
+        DragScroll();
+        break;
+      case PAGE_LINK:
+        ImGui::SetCursorPos(ImVec2(cx, 12));
+        MobileLink(cw, chip);
+        DragScroll();
+        break;
+    }
+    ImGui::EndChild();
+
+    if (now < note_until && !note.empty()) {
+      // As SS1 Tool's toast: above the bottom bar, the width of the screen less 12 dp a side.
+      auto* fg = ImGui::GetForegroundDrawList();
+      float l = o.x + (wide ? RAIL + 16 : 12), r = wide ? std::min(o.x + W - 16, l + 560) : o.x + W - 12;
+      float bottom = o.y + H - (wide ? 16 : BOTTOMNAV + 12);
+      ImGui::PushTextWrapPos(0);
+      ImVec2 ts = ImGui::GetFont()->CalcTextSizeA(14, FLT_MAX, r - l - 32, note.c_str());
+      ImGui::PopTextWrapPos();
+      ImVec2 a(l, bottom - ts.y - 24);
+      fg->AddRectFilled(a, ImVec2(r, bottom), Col(CARD), 8);
+      fg->AddRect(a, ImVec2(r, bottom), Col(ACCENT), 8);
+      fg->AddText(ImGui::GetFont(), 14, ImVec2(a.x + 16, a.y + 12), Col(TEXT), note.c_str(), nullptr, r - l - 32);
+    }
+    ImGui::End();
+  }
+
+  // Play: no device body, just its status, the screen and the controls, as large as fit.
+  void MobilePlay(ImVec2 cs, bool wide) {
+    auto* dl = ImGui::GetWindowDrawList();
+    ImVec2 o = ImGui::GetWindowPos();
+    const float pad = 16, status = 40;
+    float lcd, x0, y0;
+    if (!wide) {
+      // Upright: status, screen, controls, centred down the page.
+      float ctl = 170;
+      lcd = std::max(120.0f, std::min(cs.x - 2 * pad, cs.y - status - ctl - 2 * pad));
+      float block = status + lcd + ctl;
+      x0 = o.x + (cs.x - lcd) / 2;
+      y0 = o.y + std::max(pad, (cs.y - block) / 2);
+      MobileStatus(dl, ImVec2(x0, y0), lcd);
+      Lcd(dl, ImVec2(x0, y0 + status), lcd, lcd / 440);
+      Controls(dl, ImVec2(x0 - 8, y0 + status + lcd + 24), lcd + 16, 1, 150, 46);
+    } else {
+      // Sideways or a tablet: the screen on the left, the controls beside it.
+      lcd = std::max(120.0f, std::min(cs.y - status - 2 * pad, cs.x * 0.6f));
+      float right = cs.x - lcd - 3 * pad;
+      float total = lcd + pad + std::min(right, 380.0f);
+      x0 = o.x + std::max(pad, (cs.x - total) / 2);
+      y0 = o.y + std::max(pad, (cs.y - status - lcd) / 2);
+      MobileStatus(dl, ImVec2(x0, y0), lcd);
+      Lcd(dl, ImVec2(x0, y0 + status), lcd, lcd / 440);
+      float rw = std::min(right, 380.0f);
+      float dp = std::min(150.0f, rw * 0.45f);
+      Controls(dl, ImVec2(x0 + lcd + pad, y0 + status + lcd / 2 - dp / 2 - 24 + 24), rw, 1, dp, std::min(46.0f, rw * 0.13f));
+    }
+  }
+
+  // LED, IR, docked; Exit game and Reset on the right.
+  void MobileStatus(ImDrawList* dl, ImVec2 a, float w) {
+    float y = a.y + 8;
+    bool led = m.LedOn();
+    dl->AddCircleFilled(ImVec2(a.x + 6, y + 8), 5, led ? Col(LED_ON) : Col(0x3a2224));
+    dl->AddText(ImGui::GetFont(), 13, ImVec2(a.x + 16, y + 1), Col(TEXT3), "LED");
+    const char* ir = m.IrSending() ? "IR sending" : m.IrListening() ? "IR receiving" : "IR off";
+    dl->AddText(ImGui::GetFont(), 13, ImVec2(a.x + 56, y + 1), (m.IrSending() || m.IrListening()) ? Col(ACCENT) : Col(TEXT3), ir);
+    if (docked) dl->AddText(ImGui::GetFont(), 13, ImVec2(a.x + 146, y + 1), Col(ACCENT), "Docked");
+    ImGui::PushStyleVar(ImGuiStyleVar_FramePadding, ImVec2(10, 4));
+    ImGui::PushStyleColor(ImGuiCol_Button, ImVec4(0, 0, 0, 0));
+    float bx = a.x + w - 64;
+    ImGui::SetCursorScreenPos(ImVec2(bx, a.y + 2));
+    if (ImGui::Button("Reset", ImVec2(64, 30)) && have_bios) { m.LoadCard(cardimg); watcher.Reset(); m.Reset(); }
+    if (InGame()) {
+      ImGui::SetCursorScreenPos(ImVec2(bx - 98, a.y + 2));
+      if (ImGui::Button("Exit game", ImVec2(90, 30)) && !ExitGame())
+        Note("No saved clock to go back to yet: press Reset to leave the game.");
+    }
+    ImGui::PopStyleColor();
+    ImGui::PopStyleVar();
+  }
+
+  // Link: the network card, and two units talking by infrared.
+  void MobileLink(float w, const std::string& chip) {
+    ImGui::BeginGroup();
+    ImGui::PushStyleColor(ImGuiCol_Text, ColV(TEXT3));
+    ImGui::TextUnformatted("NETWORK CARD");
+    ImGui::PopStyleColor();
+    ImGui::Dummy(ImVec2(0, 4));
+    ListCard(chip.c_str(), "A console running Phosphor (SS1) uses this phone as its memory card.",
+             ("Port " + std::to_string(server.port) + " · the unit docks while the console talks to it").c_str(), server.Connected(), w);
+    ImGui::Dummy(ImVec2(0, 12));
+    ImGui::PushStyleColor(ImGuiCol_Text, ColV(TEXT3));
+    ImGui::TextUnformatted("INFRARED");
+    ImGui::PopStyleColor();
+    ImGui::Dummy(ImVec2(0, 4));
+    const char* ir = m.IrSending() ? "Sending" : m.IrListening() ? "Listening" : "Off";
+    ListCard((std::string("Infrared: ") + ir).c_str(), "Games that swap data between two units (MGS IDs and others).",
+             "Linking two phones over Bluetooth is coming in a later version.", false, w);
+    ImGui::EndGroup();
   }
 
   void CardsPage() {
@@ -983,12 +1245,14 @@ struct App {
   void CardMain(float gw, int cols, bool tall) {
     ImGui::BeginGroup();
     ImGui::PushFont(font_big);
-    ImGui::TextUnformatted(fs::path(CardPath()).filename().string().c_str());
+    if (tall) ImGui::PushTextWrapPos(ImGui::GetCursorPosX() + gw);   // phones: wrap, never off the edge
+    ImGui::TextWrapped("%s", fs::path(CardPath()).filename().string().c_str());
     ImGui::PopFont();
     if (!tall) ImGui::SameLine(0, 14);
     ImGui::PushStyleColor(ImGuiCol_Text, ColV(TEXT3));
-    ImGui::Text(ON_THIS_DEVICE " · %d of 15 blocks used · unit serial %08X", 15 - card::FreeBlocks(cardimg), Serial());
+    ImGui::TextWrapped(ON_THIS_DEVICE " · %d of 15 blocks used · unit serial %08X", 15 - card::FreeBlocks(cardimg), Serial());
     ImGui::PopStyleColor();
+    if (tall) ImGui::PopTextWrapPos();
     // Copy protection: some apps (MGS Integral's) only run on the PocketStation the game
     // installed them on. With this on, such an app is moved over to this unit when it arrives.
     if (!tall) ImGui::SameLine(0, 18);
@@ -1033,7 +1297,7 @@ struct App {
         dl->AddRectFilled(p, q, Col(sel ? ACCENT_BG : PANEL), 10);
         if (sel) dl->AddRect(p, q, Col(ACCENT), 10);
         dl->PushClipRect(p, q, true);
-        dl->AddText(font_bold, 14, ImVec2(p.x + 12, p.y + 12), Col(TEXT), e.title.c_str());
+        dl->AddText(font_bold, 14, ImVec2(p.x + 12, p.y + 12), Col(TEXT), alerts::DisplayName(e).c_str());
         char s2[64];
         snprintf(s2, sizeof s2, "%s · block %d of %d", e.pocketstation ? "PocketStation app" : "save", b - e.first_block + 1, e.blocks);
         dl->AddText(ImGui::GetFont(), 12, ImVec2(p.x + 12, p.y + 34), Col(TEXT3), s2);
@@ -1054,7 +1318,7 @@ struct App {
       ImGui::SetCursorScreenPos(ImVec2(p.x + 20, p.y + 16));
       ImGui::BeginGroup();
       ImGui::PushFont(font_bold);
-      ImGui::TextUnformatted(se->title.c_str());
+      ImGui::TextUnformatted(alerts::DisplayName(*se).c_str());
       ImGui::PopFont();
       ImGui::PushStyleColor(ImGuiCol_Text, ColV(TEXT2));
       ImGui::Text("%s · %s · %d block%s", se->product.c_str(), se->pocketstation ? (se->mcx1 ? "PocketStation app, resumable" : "PocketStation app") : "save",
@@ -1078,6 +1342,10 @@ struct App {
   }
 
   void Frame() {
+#if defined(__ANDROID__) || defined(MCPS_PHONE_LAYOUT)
+    MobileFrame();
+    return;
+#endif
     ImGuiViewport* vp = ImGui::GetMainViewport();
     ImGui::SetNextWindowPos(vp->Pos);
     ImGui::SetNextWindowSize(vp->Size);
@@ -1158,9 +1426,12 @@ int main(int argc, char** argv) {
 #endif
   std::string title = std::string(APP_NAME) + " " + APP_VERSION + " — PocketStation";
 #ifdef __ANDROID__
-  SDL_Window* win = SDL_CreateWindow(title.c_str(), 0, 0, 0, 0, SDL_WINDOW_FULLSCREEN | SDL_WINDOW_ALLOW_HIGHDPI);
+  // Not fullscreen: the status and navigation bars stay, as in SS1 Tool.
+  SDL_Window* win = SDL_CreateWindow(title.c_str(), 0, 0, 0, 0, SDL_WINDOW_RESIZABLE | SDL_WINDOW_ALLOW_HIGHDPI);
 #elif defined(MCPS_PHONE_LAYOUT)   // desktop check of the phone layout: a 20:9 phone held upright
-  SDL_Window* win = SDL_CreateWindow(title.c_str(), 0, 0, 1080, 2400, 0);
+  int test_w = 1080, test_h = 2400;   // MCPS_WINDOW=WxH for other phones, or sideways
+  if (getenv("MCPS_WINDOW")) sscanf(getenv("MCPS_WINDOW"), "%dx%d", &test_w, &test_h);
+  SDL_Window* win = SDL_CreateWindow(title.c_str(), 0, 0, test_w, test_h, 0);
 #else
   SDL_Window* win = SDL_CreateWindow(title.c_str(), SDL_WINDOWPOS_CENTERED, SDL_WINDOWPOS_CENTERED, 1280, 820,
                                      SDL_WINDOW_RESIZABLE | SDL_WINDOW_ALLOW_HIGHDPI);
@@ -1174,11 +1445,24 @@ int main(int argc, char** argv) {
   io.IniFilename = nullptr;
   ImFontConfig fc;
   fc.FontDataOwnedByAtlas = false;
-  io.Fonts->AddFontFromMemoryCompressedTTF(inter_regular_compressed_data, inter_regular_compressed_size, 15, &fc);
+  // Phones: the app is laid out in dp and the renderer scales it up to pixels, so the fonts are
+  // drawn at the screen's density (sharp at any size) and scaled back to dp; ImGui's own text
+  // follows Android's font size within 85-135%, as SS1 Tool's pages do.
+  float density = 1, font_scale = 1;
+#if defined(__ANDROID__)
+  density = AndroidFloat("displayDensity", 2.0f);
+  font_scale = std::clamp(AndroidFloat("fontScale", 1.0f), 0.85f, 1.35f);
+#elif defined(MCPS_PHONE_LAYOUT)
+  density = getenv("MCPS_DENSITY") ? (float)atof(getenv("MCPS_DENSITY")) : 2.625f;
+  font_scale = getenv("MCPS_FONT_SCALE") ? std::clamp((float)atof(getenv("MCPS_FONT_SCALE")), 0.85f, 1.35f) : 1.0f;
+#endif
+  float fk = std::max(1.0f, density);
+  io.FontGlobalScale = font_scale / fk;
+  io.Fonts->AddFontFromMemoryCompressedTTF(inter_regular_compressed_data, inter_regular_compressed_size, 15 * fk, &fc);
   App app;
   app.window = win;
-  app.font_bold = io.Fonts->AddFontFromMemoryCompressedTTF(inter_semibold_compressed_data, inter_semibold_compressed_size, 16, &fc);
-  app.font_big = io.Fonts->AddFontFromMemoryCompressedTTF(inter_semibold_compressed_data, inter_semibold_compressed_size, 26, &fc);
+  app.font_bold = io.Fonts->AddFontFromMemoryCompressedTTF(inter_semibold_compressed_data, inter_semibold_compressed_size, 16 * fk, &fc);
+  app.font_big = io.Fonts->AddFontFromMemoryCompressedTTF(inter_semibold_compressed_data, inter_semibold_compressed_size, 26 * fk, &fc);
   Style();
   ImGui_ImplSDL2_InitForSDLRenderer(win, ren);
   ImGui_ImplSDLRenderer2_Init(ren);
@@ -1310,14 +1594,10 @@ int main(int argc, char** argv) {
     ImGui_ImplSDL2_NewFrame();
 #if defined(__ANDROID__) || defined(MCPS_PHONE_LAYOUT)
     {
-      // Lay the app out at 820 points tall, as on a desktop window, and as wide as the screen's
-      // shape allows; SDL scales the drawing and the touches to the real screen.
+      // In dp: the screen's pixels over its density, as Android lays apps out.
       int ww, wh;
       SDL_GetRendererOutputSize(ren, &ww, &wh);
-      // Upright: 520 points wide. Sideways: 820 points tall, as on a desktop window.
-      float lw, lh;
-      if (wh > ww) { lw = 520; lh = 520.0f * wh / std::max(1, ww); }
-      else { lh = 820; lw = 820.0f * ww / std::max(1, wh); }
+      float lw = ww / density, lh = wh / density;
       SDL_RenderSetLogicalSize(ren, (int)lw, (int)lh);
       io.DisplaySize = ImVec2(lw, lh);
       io.DisplayFramebufferScale = ImVec2(1, 1);

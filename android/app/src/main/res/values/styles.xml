@@ -1,5 +1,10 @@
 <resources>
-    <style name="AppTheme" parent="android:Theme.NoTitleBar.Fullscreen">
-        <item name="android:windowBackground">@android:color/black</item>
+    <!-- As SS1 Tool for Android: no title bar, the status and navigation bars stay, in the app
+         bar's colour, and the app is laid out between them. -->
+    <style name="AppTheme" parent="android:Theme.Material.NoActionBar">
+        <item name="android:windowBackground">@color/bg</item>
+        <item name="android:statusBarColor">@color/panel</item>
+        <item name="android:navigationBarColor">@color/panel</item>
+        <item name="android:colorAccent">@color/acc</item>
     </style>
 </resources>

@@ -92,6 +92,18 @@ public class MCPSActivity extends SDLActivity {
             importUri(intent.getData());
     }
 
+    // Called from native code: the screen's density (pixels per dp) and Android's font size, so
+    // the app is laid out in dp with its text following the font size, as SS1 Tool does.
+    public static float displayDensity() {
+        MCPSActivity a = (MCPSActivity) mSingleton;
+        return a == null ? 2.0f : a.getResources().getDisplayMetrics().density;
+    }
+
+    public static float fontScale() {
+        MCPSActivity a = (MCPSActivity) mSingleton;
+        return a == null ? 1.0f : a.getResources().getConfiguration().fontScale;
+    }
+
     // Called from native code: show the system picker for any file.
     public static void pickFile() {
         final MCPSActivity a = (MCPSActivity) mSingleton;

@@ -27,6 +27,8 @@ struct Alert {
 
 // The name to show for an app: from the known releases, else its own title when readable.
 std::string GameName(const card::Entry& e);
+// Any file on the card: apps by GameName, saves by their game when it's known.
+std::string DisplayName(const card::Entry& e);
 
 class Watcher {
  public:
