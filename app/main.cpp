@@ -647,18 +647,20 @@ struct App {
     auto* dl = ImGui::GetWindowDrawList();
     ImVec2 p = ImGui::GetWindowPos();
     float w = ImGui::GetWindowWidth();
-    dl->AddText(font_bold, 18, ImVec2(p.x + 28, p.y + 21), Col(ACCENT), "P O C K E T S T A T I O N");
+    bool tall = Portrait();
+    dl->AddText(font_bold, 18, ImVec2(p.x + (tall ? 20 : 28), p.y + 21), Col(ACCENT), tall ? "POCKETSTATION" : "P O C K E T S T A T I O N");
     const char* tabs[2] = {"Play", "Cards"};
     for (int i = 0; i < 2; i++) {
       bool on = page == i;
-      ImGui::SetCursorPos(ImVec2(280.0f + i * 80, 14));
+      ImGui::SetCursorPos(ImVec2(tall ? w - 20 - (2 - i) * 80 + 8 : 280.0f + i * 80, 14));
       ImGui::PushStyleColor(ImGuiCol_Button, on ? ColV(ACCENT_BG) : ImVec4(0, 0, 0, 0));
       ImGui::PushStyleColor(ImGuiCol_Border, on ? ColV(ACCENT) : ColV(LINE));
       ImGui::PushStyleColor(ImGuiCol_Text, on ? ColV(TEXT) : ColV(TEXT3));
       if (ImGui::Button(tabs[i], ImVec2(72, 34))) page = i;
       ImGui::PopStyleColor(3);
     }
-    // Network chip on the right.
+    // Network chip on the right (on a phone held upright it's on the Cards page instead).
+    if (tall) { dl->AddLine(ImVec2(p.x, p.y + 61), ImVec2(p.x + w, p.y + 61), Col(LINE)); return; }
     std::string chip;
     unsigned dot;
     if (!server.Listening()) { chip = "Network card off"; dot = TEXT4; }
@@ -690,12 +692,47 @@ struct App {
     return clicked;
   }
 
+  // A phone held upright: the window is taller than wide.
+  bool Portrait() const { ImVec2 d = ImGui::GetIO().DisplaySize; return d.y > d.x; }
+
+  // Touch scrolling for a child window: a drag that didn't start on a widget scrolls it.
+  void DragScroll() {
+    ImGuiIO& io = ImGui::GetIO();
+    if (ImGui::IsWindowHovered(ImGuiHoveredFlags_ChildWindows) && ImGui::IsMouseDragging(0) && !ImGui::IsAnyItemActive())
+      ImGui::SetScrollY(ImGui::GetScrollY() - io.MouseDelta.y);
+  }
+
   void PlayPage() {
     float H = ImGui::GetWindowHeight() - 62, W = ImGui::GetWindowWidth();
+    if (Portrait()) {
+      float uh = std::min(H * 0.74f, (W - 20) / 536.0f * 712 + 70);
+      ImGui::SetCursorPos(ImVec2(0, 62));
+      ImGui::BeginChild("unit", ImVec2(W, uh));
+      UnitPanel();
+      ImGui::EndChild();
+      ImGui::SetCursorPos(ImVec2(0, 62 + uh));
+      ImGui::BeginChild("games", ImVec2(W, H - uh), ImGuiChildFlags_None);
+      ImGui::SetCursorPos(ImVec2(20, 8));
+      GameList(W - 40);
+      DragScroll();
+      ImGui::EndChild();
+      return;
+    }
     // Left: the mini-games on the card.
     ImGui::SetCursorPos(ImVec2(0, 62));
     ImGui::BeginChild("games", ImVec2(300, H), ImGuiChildFlags_None);
     ImGui::SetCursorPos(ImVec2(20, 20));
+    GameList(260);
+    ImGui::EndChild();
+    ImVec2 wp = ImGui::GetWindowPos();
+    ImGui::GetWindowDrawList()->AddLine(ImVec2(wp.x + 300, wp.y + 62), ImVec2(wp.x + 300, wp.y + 62 + H), Col(LINE));
+    ImGui::SetCursorPos(ImVec2(301, 62));
+    ImGui::BeginChild("unit", ImVec2(W - 301, H));
+    UnitPanel();
+    ImGui::EndChild();
+  }
+
+  void GameList(float lw) {
     ImGui::BeginGroup();
     ImGui::PushStyleColor(ImGuiCol_Text, ColV(TEXT3));
     ImGui::TextUnformatted("MINI-GAMES ON THE CARD");
@@ -710,25 +747,23 @@ struct App {
       snprintf(sub, sizeof sub, "block %d%s · %d block%s%s", e.first_block, e.blocks > 1 ? ("-" + std::to_string(e.first_block + e.blocks - 1)).c_str() : "",
                e.blocks, e.blocks == 1 ? "" : "s", e.mcx1 ? " · resumable" : "");
       ImGui::PushID(e.first_block);
-      if (ListCard(e.title.c_str(), sub, e.product.c_str(), selected == e.first_block, 260)) selected = e.first_block;
+      if (ListCard(e.title.c_str(), sub, e.product.c_str(), selected == e.first_block, lw)) selected = e.first_block;
       ImGui::PopID();
     }
-    ListCard("Clock", "Built in", nullptr, false, 260);
+    ListCard("Clock", "Built in", nullptr, false, lw);
     ImGui::Dummy(ImVec2(0, 6));
     ImGui::PushStyleColor(ImGuiCol_Text, ColV(TEXT4));
-    ImGui::PushTextWrapPos(ImGui::GetCursorPosX() + 260);
+    ImGui::PushTextWrapPos(ImGui::GetCursorPosX() + lw);
+#ifdef __ANDROID__
+    ImGui::TextUnformatted(games ? "On the clock, Left / Right shows the games on the card; Fire starts the one shown. Exit game goes back to the clock."
+                                 : "No mini-games on this card yet. Add them from the Cards page.");
+#else
     ImGui::TextUnformatted(games ? "On the clock, Left / Right shows the games on the card; Fire starts the one shown. Exit game (F3, or Start on a controller) goes back to the clock."
                                  : "No mini-games on this card yet. Drop a .mcs, .psv or .gme on this window, or load them from the Cards page.");
+#endif
     ImGui::PopTextWrapPos();
     ImGui::PopStyleColor();
     ImGui::EndGroup();
-    ImGui::EndChild();
-    ImVec2 wp = ImGui::GetWindowPos();
-    ImGui::GetWindowDrawList()->AddLine(ImVec2(wp.x + 300, wp.y + 62), ImVec2(wp.x + 300, wp.y + 62 + H), Col(LINE));
-    ImGui::SetCursorPos(ImVec2(301, 62));
-    ImGui::BeginChild("unit", ImVec2(W - 301, H));
-    UnitPanel();
-    ImGui::EndChild();
   }
 
   void UnitPanel() {
@@ -844,17 +879,46 @@ struct App {
     dl->AddText(font_bold, 16 * s, ImVec2(fc.x - ft.x / 2, fc.y - ft.y / 2), Col(BG), "Fire");
 
     // Key hints under the unit.
+#ifdef __ANDROID__
+    std::string hint = pad ? std::string("Controller: ") + SDL_GameControllerName(pad) : "";
+#else
     std::string hint = "Arrows: d-pad      Z / Enter: Fire      ";
     hint += pad ? std::string("Controller: ") + SDL_GameControllerName(pad) : "Controller: plug one in";
+#endif
     ImVec2 hs = ImGui::CalcTextSize(hint.c_str());
     dl->AddText(ImVec2(c.x - hs.x / 2, bmax.y + 14), Col(TEXT3), hint.c_str());
   }
 
   void CardsPage() {
     float H = ImGui::GetWindowHeight() - 62, W = ImGui::GetWindowWidth();
+    if (Portrait()) {
+      ImGui::SetCursorPos(ImVec2(0, 62));
+      ImGui::BeginChild("cards", ImVec2(W, H));
+      ImGui::SetCursorPos(ImVec2(20, 16));
+      CardMain(W - 40, 3, true);
+      ImGui::Dummy(ImVec2(0, 12));
+      ImGui::SetCursorPosX(20);
+      CardSide(W - 40);
+      ImGui::Dummy(ImVec2(0, 30));
+      DragScroll();
+      ImGui::EndChild();
+      return;
+    }
     ImGui::SetCursorPos(ImVec2(0, 62));
     ImGui::BeginChild("cardside", ImVec2(320, H));
     ImGui::SetCursorPos(ImVec2(20, 20));
+    CardSide(280);
+    ImGui::EndChild();
+    ImVec2 wp = ImGui::GetWindowPos();
+    ImGui::GetWindowDrawList()->AddLine(ImVec2(wp.x + 320, wp.y + 62), ImVec2(wp.x + 320, wp.y + 62 + H), Col(LINE));
+    ImGui::SetCursorPos(ImVec2(321, 62));
+    ImGui::BeginChild("cardmain", ImVec2(W - 321, H));
+    ImGui::SetCursorPos(ImVec2(32, 24));
+    CardMain(ImGui::GetContentRegionAvail().x - 32, 5, false);
+    ImGui::EndChild();
+  }
+
+  void CardSide(float sw) {
     ImGui::BeginGroup();
     ImGui::PushStyleColor(ImGuiCol_Text, ColV(TEXT3));
     ImGui::TextUnformatted(ON_THIS_DEVICE_CAPS);
@@ -862,17 +926,17 @@ struct App {
     ImGui::Dummy(ImVec2(0, 4));
     char sub[96];
     snprintf(sub, sizeof sub, "%d of 15 blocks used", 15 - card::FreeBlocks(cardimg));
-    ListCard(fs::path(CardPath()).filename().string().c_str(), sub, nullptr, true, 280);
+    ListCard(fs::path(CardPath()).filename().string().c_str(), sub, nullptr, true, sw);
     ImGui::Dummy(ImVec2(0, 8));
-    if (ImGui::Button("Load a card...", ImVec2(280, 34))) {
+    if (ImGui::Button("Load a card...", ImVec2(sw, 34))) {
       std::string f = OpenFileDialog("Memory cards and saves", "*.mcd;*.mcr;*.mc;*.srm;*.gme;*.mcs;*.psv;*.psx;*.ps1");
       if (!f.empty()) Open(f);
     }
-    if (ImGui::Button("Add a save or mini-game...", ImVec2(280, 34))) {
+    if (ImGui::Button("Add a save or mini-game...", ImVec2(sw, 34))) {
       std::string f = OpenFileDialog("Single saves", "*.mcs;*.psv;*.psx;*.ps1");
       if (!f.empty()) Open(f);
     }
-    if (ImGui::Button("Save the card as...", ImVec2(280, 34)))
+    if (ImGui::Button("Save the card as...", ImVec2(sw, 34)))
       Export("Memory card (raw)", "*.mcd", "mcd", "PocketStation.mcd", cardimg);
     ImGui::Dummy(ImVec2(0, 14));
     ImGui::PushStyleColor(ImGuiCol_Text, ColV(TEXT3));
@@ -881,35 +945,33 @@ struct App {
     ImGui::Dummy(ImVec2(0, 4));
     std::string ns = server.Listening() ? (server.Connected() ? "Connected: " + server.Peer() : "Waiting on port " + std::to_string(server.port)) : "Off";
     snprintf(sub, sizeof sub, "%d commands answered", server.commands);
-    ListCard(ns.c_str(), sub, nullptr, false, 280);
+    ListCard(ns.c_str(), sub, nullptr, false, sw);
     ImGui::Dummy(ImVec2(0, 14));
     ImGui::PushStyleColor(ImGuiCol_Text, ColV(TEXT3));
     ImGui::TextUnformatted("BIOS");
     ImGui::PopStyleColor();
     ImGui::Dummy(ImVec2(0, 4));
-    ListCard(have_bios ? fs::path(cfg.bios).filename().string().c_str() : "None yet", have_bios ? "Your own dump" : "Drop a 16 KB BIOS file", nullptr, false, 280);
-    if (ImGui::Button("Choose BIOS...", ImVec2(280, 34))) {
+    ListCard(have_bios ? fs::path(cfg.bios).filename().string().c_str() : "None yet", have_bios ? "Your own dump" : "Drop a 16 KB BIOS file", nullptr, false, sw);
+    if (ImGui::Button("Choose BIOS...", ImVec2(sw, 34))) {
       std::string f = OpenFileDialog("PocketStation BIOS (16 KB)", "*.bin;*.rom");
       if (!f.empty()) Open(f);
     }
     ImGui::EndGroup();
-    ImGui::EndChild();
-    ImVec2 wp = ImGui::GetWindowPos();
-    ImGui::GetWindowDrawList()->AddLine(ImVec2(wp.x + 320, wp.y + 62), ImVec2(wp.x + 320, wp.y + 62 + H), Col(LINE));
-    ImGui::SetCursorPos(ImVec2(321, 62));
-    ImGui::BeginChild("cardmain", ImVec2(W - 321, H));
-    ImGui::SetCursorPos(ImVec2(32, 24));
+  }
+
+  // The card: name, blocks (`cols` to a row), the selected file. `tall` stacks the header.
+  void CardMain(float gw, int cols, bool tall) {
     ImGui::BeginGroup();
     ImGui::PushFont(font_big);
     ImGui::TextUnformatted(fs::path(CardPath()).filename().string().c_str());
     ImGui::PopFont();
-    ImGui::SameLine(0, 14);
+    if (!tall) ImGui::SameLine(0, 14);
     ImGui::PushStyleColor(ImGuiCol_Text, ColV(TEXT3));
     ImGui::Text(ON_THIS_DEVICE " · %d of 15 blocks used · unit serial %08X", 15 - card::FreeBlocks(cardimg), Serial());
     ImGui::PopStyleColor();
     // Copy protection: some apps (MGS Integral's) only run on the PocketStation the game
     // installed them on. With this on, such an app is moved over to this unit when it arrives.
-    ImGui::SameLine(0, 18);
+    if (!tall) ImGui::SameLine(0, 18);
     if (ImGui::Checkbox("Unlock apps from other PocketStations", &cfg.unlock)) {
       cfg.Save();
       if (cfg.unlock) Bind();
@@ -931,7 +993,7 @@ struct App {
         cur = next + 1;
       }
     }
-    float gw = ImGui::GetContentRegionAvail().x - 32, cw = (gw - 40) / 5;
+    float cw = (gw - 10 * (cols - 1)) / cols;
     auto* dl = ImGui::GetWindowDrawList();
     for (int b = 1; b < 16; b++) {
       ImVec2 p = ImGui::GetCursorScreenPos();
@@ -958,7 +1020,7 @@ struct App {
         dl->AddText(ImGui::GetFont(), 12, ImVec2(p.x + 12, p.y + 52), Col(TEXT4), e.product.c_str());
         dl->PopClipRect();
       }
-      if (b % 5 != 0) ImGui::SameLine(0, 10);
+      if (b % cols != 0 && b != 15) ImGui::SameLine(0, 10);
       else ImGui::Dummy(ImVec2(0, 2));
     }
 
@@ -988,10 +1050,11 @@ struct App {
     }
     ImGui::Dummy(ImVec2(0, 8));
     ImGui::PushStyleColor(ImGuiCol_Text, ColV(TEXT4));
+    ImGui::PushTextWrapPos(ImGui::GetCursorPosX() + gw);
     ImGui::TextUnformatted("The card saves itself as you play. Loading another card keeps the old one as .bak.");
+    ImGui::PopTextWrapPos();
     ImGui::PopStyleColor();
     ImGui::EndGroup();
-    ImGui::EndChild();
   }
 
   void Frame() {
@@ -1064,15 +1127,15 @@ int main(int argc, char** argv) {
   }
   SDL_SetHint(SDL_HINT_JOYSTICK_ALLOW_BACKGROUND_EVENTS, "1");
 #ifdef __ANDROID__
-  SDL_SetHint(SDL_HINT_ORIENTATIONS, "LandscapeLeft LandscapeRight");
+  SDL_SetHint(SDL_HINT_ORIENTATIONS, "Portrait PortraitUpsideDown LandscapeLeft LandscapeRight");
   SDL_SetHint(SDL_HINT_ANDROID_TRAP_BACK_BUTTON, "1");
   SDL_SetHint(SDL_HINT_TOUCH_MOUSE_EVENTS, "1");
 #endif
   std::string title = std::string(APP_NAME) + " " + APP_VERSION + " — PocketStation";
 #ifdef __ANDROID__
   SDL_Window* win = SDL_CreateWindow(title.c_str(), 0, 0, 0, 0, SDL_WINDOW_FULLSCREEN | SDL_WINDOW_ALLOW_HIGHDPI);
-#elif defined(MCPS_PHONE_LAYOUT)   // desktop check of the phone layout: a 20:9 phone screen
-  SDL_Window* win = SDL_CreateWindow(title.c_str(), 0, 0, 2400, 1080, 0);
+#elif defined(MCPS_PHONE_LAYOUT)   // desktop check of the phone layout: a 20:9 phone held upright
+  SDL_Window* win = SDL_CreateWindow(title.c_str(), 0, 0, 1080, 2400, 0);
 #else
   SDL_Window* win = SDL_CreateWindow(title.c_str(), SDL_WINDOWPOS_CENTERED, SDL_WINDOWPOS_CENTERED, 1280, 820,
                                      SDL_WINDOW_RESIZABLE | SDL_WINDOW_ALLOW_HIGHDPI);
@@ -1192,9 +1255,12 @@ int main(int argc, char** argv) {
       // shape allows; SDL scales the drawing and the touches to the real screen.
       int ww, wh;
       SDL_GetRendererOutputSize(ren, &ww, &wh);
-      float lw = 820.0f * ww / std::max(1, wh);
-      SDL_RenderSetLogicalSize(ren, (int)lw, 820);
-      io.DisplaySize = ImVec2(lw, 820);
+      // Upright: 520 points wide. Sideways: 820 points tall, as on a desktop window.
+      float lw, lh;
+      if (wh > ww) { lw = 520; lh = 520.0f * wh / std::max(1, ww); }
+      else { lh = 820; lw = 820.0f * ww / std::max(1, wh); }
+      SDL_RenderSetLogicalSize(ren, (int)lw, (int)lh);
+      io.DisplaySize = ImVec2(lw, lh);
       io.DisplayFramebufferScale = ImVec2(1, 1);
     }
 #endif
