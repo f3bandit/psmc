@@ -120,7 +120,7 @@ namespace fs = std::filesystem;
 using ps::u8;
 
 static const char* APP_NAME = "MC/PS MemCard Pro";
-static const char* APP_VERSION = "0.1.17";
+static const char* APP_VERSION = "0.1.18";
 #ifdef __ANDROID__
 #define ON_THIS_DEVICE "on this phone"
 #define ON_THIS_DEVICE_CAPS "ON THIS PHONE"
@@ -422,7 +422,8 @@ struct App {
   irlink::Link lnk;                  // infrared with another unit over the network: see link.hpp
   std::string link_name;             // this unit's name on the network
   char link_ip[64] = "";
-  double link_panel_at = -1;         // the Link panel was last drawn then: look for units meanwhile
+  double link_panel_at = -1;
+  double relisten_at = 0;         // the Link panel was last drawn then: look for units meanwhile
   bool multicast = false;
   // Anything that changes the unit other than the link itself (a reset, another card, the clock,
   // the console) would make the two sides' copies differ: it ends the link first.
@@ -674,21 +675,20 @@ struct App {
     ImGui::Dummy(ImVec2(0, 4));
     using L = irlink::Link;
     std::string ip = L::LocalIp();
-    if (lnk.state == L::OFF) {
+    if (lnk.state == L::OFF || lnk.state == L::WAITING) {
       SetMulticast(true);
       lnk.Discover(now);
       ImGui::PushStyleColor(ImGuiCol_Text, ColV(TEXT3));
       ImGui::PushTextWrapPos(ImGui::GetCursorPosX() + w);
-      ImGui::TextWrapped("Link with another PocketStation on your network (a phone or a PC running this app) for games "
-                         "that use infrared: both units run on both sides, so it works like holding them face to face.");
+      ImGui::TextWrapped("Other PocketStations on your network (phones or PCs running this app) show up here. Tap one "
+                         "to link for games that use infrared: both units run on both sides, as if held face to face.");
       ImGui::PopTextWrapPos();
       ImGui::PopStyleColor();
       ImGui::Dummy(ImVec2(0, 4));
       if (!have_bios) ImGui::BeginDisabled();
-      if (ImGui::Button("Wait for a link", ImVec2(w, 40))) { Undock(); lnk.Host(link_name); }
       for (auto& f : lnk.found) {
         ImGui::PushID(f.ip.c_str());
-        if (ListCard(("Link with " + f.name).c_str(), (f.ip + " · waiting for a link").c_str(), nullptr, false, w)) {
+        if (ListCard(("Link with " + f.name).c_str(), f.ip.c_str(), nullptr, false, w)) {
           strncpy(link_ip, f.ip.c_str(), sizeof link_ip - 1);
           Undock();
           lnk.Join(f.ip, f.port, link_name);
@@ -697,32 +697,32 @@ struct App {
       }
       if (lnk.found.empty()) {
         ImGui::PushStyleColor(ImGuiCol_Text, ColV(TEXT4));
-        ImGui::TextUnformatted("No units waiting on the network yet.");
+        ImGui::TextUnformatted("Looking for other units...");
         ImGui::PopStyleColor();
       }
+      ImGui::Dummy(ImVec2(0, 4));
       ImGui::SetNextItemWidth(w - 88);
       ImGui::InputTextWithHint("##ip", "or its address, e.g. 192.168.1.20", link_ip, sizeof link_ip, ImGuiInputTextFlags_CharsDecimal);
       ImGui::SameLine(0, 8);
       if (ImGui::Button("Link", ImVec2(80, 0)) && link_ip[0]) { Undock(); lnk.Join(link_ip, irlink::PORT, link_name); }
       if (!have_bios) ImGui::EndDisabled();
+      if (!lnk.ended.empty()) {
+        ImGui::PushStyleColor(ImGuiCol_Text, ColV(TEXT4));
+        ImGui::PushTextWrapPos(ImGui::GetCursorPosX() + w);
+        ImGui::TextWrapped("Last link: %s", lnk.ended.c_str());
+        ImGui::PopTextWrapPos();
+        ImGui::PopStyleColor();
+      }
     } else {
       SetMulticast(false);
       lnk.StopDiscovery();
       std::string sub = lnk.state == L::RUNNING ? (lnk.stalled ? "Waiting for " + lnk.peer_name + "..." : "Infrared shared · " + lnk.peer_ip)
-                        : lnk.state == L::WAITING ? "This unit is " + link_name + (ip.empty() ? "" : " at " + ip)
-                                                  : "Connecting...";
+                                                : "Connecting...";
       ListCard(lnk.status.c_str(), sub.c_str(), nullptr, lnk.state == L::RUNNING, w);
       if (ImGui::Button(lnk.state == L::RUNNING ? "End link" : "Cancel", ImVec2(w, 40))) lnk.Stop("Link ended");
     }
-    if (lnk.state == L::OFF && !lnk.status.empty()) {
-      ImGui::PushStyleColor(ImGuiCol_Text, ColV(TEXT4));
-      ImGui::PushTextWrapPos(ImGui::GetCursorPosX() + w);
-      ImGui::TextWrapped("%s", lnk.status.c_str());
-      ImGui::PopTextWrapPos();
-      ImGui::PopStyleColor();
-    }
     ImGui::PushStyleColor(ImGuiCol_Text, ColV(TEXT4));
-    ImGui::Text("This unit: %s%s%s", link_name.c_str(), ip.empty() ? "" : " · ", ip.c_str());
+    ImGui::Text("This unit: %s%s%s · visible on the network", link_name.c_str(), ip.empty() ? "" : " · ", ip.c_str());
     ImGui::PopStyleColor();
     ImGui::EndGroup();
   }
@@ -745,10 +745,13 @@ struct App {
     if (docked && now >= undock_at && !lnk.Running()) { docked = false; m.SetDocked(false); }
     if (clock_sync_at >= 0 && now >= clock_sync_at && !lnk.Busy()) { clock_sync_at = -1; SyncClock(); }
     bool was_linked = lnk.Running();
+    // Always visible to other units on the network, ready to take a link.
+    if (lnk.state == irlink::Link::OFF && now >= relisten_at) { relisten_at = now + 5; lnk.Host(link_name); }
     if (lnk.Busy()) lnk.Poll(now, m, bios_rom);
+    if (lnk.state == irlink::Link::STARTING) Undock();
     if (lnk.Running()) lnk.Advance(m, held, SDL_GetTicks64() / 1000.0);    // both units, in step
     else if (lnk.state != irlink::Link::STARTING) { m.ir_light = false; m.RunFor(std::min(dt, cap)); }
-    if (was_linked && !lnk.Running() && !lnk.status.empty()) Note(lnk.status);   // why it ended
+    if (was_linked && !lnk.Running() && !lnk.ended.empty()) Note(lnk.ended);   // why it ended
     if (link_panel_at >= 0 && now - link_panel_at > 0.5) { lnk.StopDiscovery(); link_panel_at = -1; SetMulticast(false); }
     TrackHome();
     if (state_save_at < 0) state_save_at = now + 30;

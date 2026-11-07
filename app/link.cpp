@@ -5,6 +5,7 @@
 #include <algorithm>
 #include <cerrno>
 #include <cstdio>
+#include <cstdlib>
 #include <cstring>
 
 #ifdef _WIN32
@@ -33,7 +34,7 @@ namespace irlink {
 namespace {
 
 constexpr uint32_t VERSION = 1;
-enum : uint8_t { M_HELLO = 1, M_START = 2, M_INPUT = 3, M_CHECK = 4, M_BYE = 5 };
+enum : uint8_t { M_HELLO = 1, M_START = 2, M_INPUT = 3, M_CHECK = 4, M_BYE = 5, M_PING = 6, M_PONG = 7 };
 const char* ADVERT = "MCPSLINK1";
 
 void StartSockets() {
@@ -54,6 +55,19 @@ uint32_t Crc32(const uint8_t* d, size_t n, uint32_t c = 0) {
 
 void Put32(std::vector<uint8_t>& v, uint32_t x) { for (int i = 0; i < 4; i++) v.push_back((uint8_t)(x >> (8 * i))); }
 uint32_t Get32(const uint8_t* p) { return p[0] | p[1] << 8 | p[2] << 16 | (uint32_t)p[3] << 24; }
+
+std::vector<uint8_t> Frame(uint8_t type, const std::string& text) {
+  std::vector<uint8_t> f{type};
+  Put32(f, (uint32_t)text.size());
+  f.insert(f.end(), text.begin(), text.end());
+  return f;
+}
+
+// The directed broadcast address of this machine's network (a.b.c.255 for a /24).
+std::string SubnetBroadcast(const std::string& ip) {
+  auto dot = ip.rfind('.');
+  return dot == std::string::npos ? "" : ip.substr(0, dot) + ".255";
+}
 
 void NoDelay(long long s) {
   int one = 1;
@@ -93,6 +107,8 @@ void Link::Close() {
   if (listen_ >= 0) sclose(listen_);
   if (adv_ >= 0) sclose(adv_);
   sock_ = listen_ = adv_ = -1;
+  for (auto& p : pending_) sclose(p.sock);
+  pending_.clear();
   connected_ = sent_hello_ = sent_start_ = got_start_ = false;
   in_.clear();
   out_.clear();
@@ -128,7 +144,7 @@ bool Link::Host(const std::string& name) {
   state = WAITING;
   next_advert_ = 0;
   std::string ip = LocalIp();
-  status = "Waiting for a link" + (ip.empty() ? std::string() : " at " + ip);
+  status = "Visible on the network as " + name_ + (ip.empty() ? std::string() : " (" + ip + ")");
   return true;
 }
 
@@ -167,7 +183,7 @@ void Link::Stop(const std::string& why) {
   state = OFF;
   stalled = false;
   host_ = false;
-  if (!why.empty()) status = why;
+  if (!why.empty()) status = ended = why;
   tick_ = sent_upto_ = 0;
   mine_.clear();
   theirs_.clear();
@@ -209,17 +225,80 @@ void Link::Discover(double now) {
     if (sscanf(b, "%15s %d %127[^\n]", tag, &port, nm) < 2 || strcmp(tag, ADVERT) != 0) continue;
     char ip[64];
     inet_ntop(AF_INET, &from.sin_addr, ip, sizeof ip);
-    if (state == WAITING && std::string(nm) == name_ && std::string(ip) == LocalIp()) continue;   // ourselves
+    if (std::string(ip) == LocalIp()) continue;   // ourselves
     auto it = std::find_if(found.begin(), found.end(), [&](const Found& f) { return f.ip == ip && f.port == port; });
     if (it == found.end()) found.push_back({nm, ip, port, now});
     else { it->seen = now; it->name = nm; }
   }
-  found.erase(std::remove_if(found.begin(), found.end(), [&](const Found& f) { return now - f.seen > 4; }), found.end());
+  Sweep(now);
+  found.erase(std::remove_if(found.begin(), found.end(), [&](const Found& f) { return now - f.seen > 12; }), found.end());
+}
+
+// Broadcasts don't cross every network (many Wi-Fi routers drop them, and a PC may send them out
+// of the wrong adapter), so also ask every address on this network directly, every few seconds:
+// a unit answers a PING on its link port with its name.
+void Link::Sweep(double now) {
+  std::string me = LocalIp();
+  if (probes_.empty() && now >= next_sweep_ && !me.empty()) {
+    next_sweep_ = now + 5;
+    std::string net = me.substr(0, me.rfind('.') + 1);
+    for (int i = 1; i < 255; i++) {
+      std::string ip = net + std::to_string(i);
+      if (ip == me && !getenv("MCPS_LINK_SEE_SELF")) continue;   // (tests: two units on one machine)
+      long long s = (long long)socket(AF_INET, SOCK_STREAM, 0);
+      if (s < 0) break;
+      nonblock(s);
+      sockaddr_in a{};
+      a.sin_family = AF_INET;
+      a.sin_port = htons(PORT);
+      inet_pton(AF_INET, ip.c_str(), &a.sin_addr);
+      int r = connect((sock_t)s, (sockaddr*)&a, sizeof a);
+      if (r != 0 && !would_block()) { sclose(s); continue; }
+      probes_.push_back({s, ip, now, false, {}});
+    }
+  }
+  for (auto& p : probes_) {
+    if (p.sock < 0) continue;
+    if (!p.sent) {
+      fd_set w;
+      FD_ZERO(&w);
+      FD_SET((sock_t)p.sock, &w);
+      timeval tv{0, 0};
+      if (select((int)p.sock + 1, nullptr, &w, nullptr, &tv) > 0) {
+        int err = 0;
+        socklen_t el = sizeof err;
+        getsockopt((sock_t)p.sock, SOL_SOCKET, SO_ERROR, (char*)&err, &el);
+        if (err) { sclose(p.sock); p.sock = -1; continue; }
+        auto f = Frame(M_PING, name_);
+        send((sock_t)p.sock, (const char*)f.data(), (int)f.size(), MSG_NOSIGNAL);
+        p.sent = true;
+      }
+    }
+    if (p.sent) {
+      uint8_t b[512];
+      int n = (int)recv((sock_t)p.sock, (char*)b, sizeof b, 0);
+      if (n > 0) p.buf.insert(p.buf.end(), b, b + n);
+      if (p.buf.size() >= 5 && p.buf.size() >= 5 + Get32(&p.buf[1])) {
+        if (p.buf[0] == M_PONG) {
+          std::string nm(p.buf.begin() + 5, p.buf.begin() + 5 + Get32(&p.buf[1]));
+          auto it = std::find_if(found.begin(), found.end(), [&](const Found& f) { return f.ip == p.ip; });
+          if (it == found.end()) found.push_back({nm, p.ip, PORT, now});
+          else { it->seen = now; it->name = nm; }
+        }
+        sclose(p.sock);
+        p.sock = -1;
+      } else if (n == 0) { sclose(p.sock); p.sock = -1; }
+    }
+    if (p.sock >= 0 && now - p.since > 2) { sclose(p.sock); p.sock = -1; }
+  }
+  probes_.erase(std::remove_if(probes_.begin(), probes_.end(), [](const Probe& p) { return p.sock < 0; }), probes_.end());
 }
 
 void Link::StopDiscovery() {
   if (udp_ >= 0) sclose(udp_);
   udp_ = -1;
+  for (auto& p : probes_) if (p.sock >= 0) sclose(p.sock);
+  probes_.clear();
   found.clear();
 }
 
@@ -252,6 +331,9 @@ void Link::Poll(double now, ps::PocketStation& own, const std::vector<uint8_t>& 
       a.sin_port = htons(PORT);
       a.sin_addr.s_addr = htonl(INADDR_BROADCAST);
       sendto((sock_t)adv_, msg, (int)strlen(msg), 0, (sockaddr*)&a, sizeof a);
+      std::string sub = SubnetBroadcast(LocalIp());   // and this network's own broadcast address
+      if (!sub.empty() && inet_pton(AF_INET, sub.c_str(), &a.sin_addr) == 1)
+        sendto((sock_t)adv_, msg, (int)strlen(msg), 0, (sockaddr*)&a, sizeof a);
     }
     sockaddr_in from{};
     socklen_t fl = sizeof from;
@@ -259,18 +341,41 @@ void Link::Poll(double now, ps::PocketStation& own, const std::vector<uint8_t>& 
     if (c >= 0) {
       nonblock(c);
       NoDelay(c);
-      sock_ = c;
       char ip[64];
       inet_ntop(AF_INET, &from.sin_addr, ip, sizeof ip);
-      peer_ip = ip;
-      sclose(listen_);
-      listen_ = -1;
-      if (adv_ >= 0) sclose(adv_);
-      adv_ = -1;
-      connected_ = true;
-      state = STARTING;
-      status = "Linking with " + peer_ip + "...";
+      pending_.push_back({c, ip, now, {}});
     }
+    // What a new connection wants: a PING (another unit looking around) gets our name; a HELLO
+    // is a link.
+    for (auto& p : pending_) {
+      if (p.sock < 0) continue;
+      uint8_t b[4096];
+      int n = (int)recv((sock_t)p.sock, (char*)b, sizeof b, 0);
+      if (n > 0) p.buf.insert(p.buf.end(), b, b + n);
+      bool whole = p.buf.size() >= 5 && p.buf.size() >= 5 + Get32(&p.buf[1]);
+      if (whole && p.buf[0] == M_PING) {
+        auto f = Frame(M_PONG, name_);
+        send((sock_t)p.sock, (const char*)f.data(), (int)f.size(), MSG_NOSIGNAL);
+        sclose(p.sock);
+        p.sock = -1;
+      } else if (whole && p.buf[0] == M_HELLO && state == WAITING) {
+        sock_ = p.sock;
+        p.sock = -1;
+        in_ = p.buf;
+        peer_ip = p.ip;
+        sclose(listen_);
+        listen_ = -1;
+        if (adv_ >= 0) sclose(adv_);
+        adv_ = -1;
+        connected_ = true;
+        state = STARTING;
+        status = "Linking with " + peer_ip + "...";
+      } else if (whole || n == 0 || now - p.since > 3) {
+        sclose(p.sock);
+        p.sock = -1;
+      }
+    }
+    pending_.erase(std::remove_if(pending_.begin(), pending_.end(), [](const Pending& p) { return p.sock < 0; }), pending_.end());
   }
   if (state == CONNECTING) {
     if (connect_started_ < 0) connect_started_ = now;

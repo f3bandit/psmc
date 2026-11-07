@@ -36,16 +36,19 @@ class Link {
 
   ~Link();
   State state = OFF;
-  std::string status;          // one line for the UI: what's happening, or why it ended
+  std::string status;          // one line for the UI: what's happening
+  std::string ended;           // why the last link ended (empty: none yet)
   std::string peer_name, peer_ip;
   std::vector<Found> found;    // units on the network waiting for a link
   bool stalled = false;        // running, but waiting on the other side's presses
   std::unique_ptr<ps::PocketStation> peer;   // the other unit, run here in step with ours
 
-  bool Host(const std::string& name);                              // wait for a link
+  // Be visible on the network and take links from other units (the app does this all along).
+  bool Host(const std::string& name);
   bool Join(const std::string& ip, int port, const std::string& name);
   void Stop(const std::string& why);                               // end it (tells the other side)
-  // Listen for units waiting for a link (fills `found`). Call while the Link page is up.
+  // Look for other units (fills `found`): their broadcasts, and asking every address on this
+  // network. Call while the Link page is up.
   void Discover(double now);
   void StopDiscovery();
 
@@ -67,6 +70,12 @@ class Link {
   void Start(ps::PocketStation& own, const std::vector<uint8_t>& bios);
   void StepPair(ps::PocketStation& a, ps::PocketStation& b, int64_t until_us);
   void Close();
+  void Sweep(double now);
+  struct Pending { long long sock; std::string ip; double since; std::vector<uint8_t> buf; };
+  struct Probe { long long sock; std::string ip; double since; bool sent; std::vector<uint8_t> buf; };
+  std::vector<Pending> pending_;
+  std::vector<Probe> probes_;
+  double next_sweep_ = 0;
 
   long long listen_ = -1, sock_ = -1, udp_ = -1, adv_ = -1;
   bool host_ = false, connected_ = false, sent_hello_ = false, sent_start_ = false;

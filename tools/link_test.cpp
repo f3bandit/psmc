@@ -105,7 +105,7 @@ int main(int argc, char** argv) {
   irlink::Link la, lb;
   if (!la.Host("Side A")) { printf("host: %s\n", la.status.c_str()); return 1; }
   double wall = 0;
-  for (int i = 0; i < 30; i++) { la.Poll(wall, ua, bios); lb.Discover(wall); wall += 0.05; }
+  for (int i = 0; i < 60; i++) { la.Poll(wall, ua, bios); lb.Discover(wall); wall += 0.05; }
   printf("found %zu unit(s)%s\n", lb.found.size(), lb.found.empty() ? "" : (": " + lb.found[0].name + " at " + lb.found[0].ip).c_str());
   lb.StopDiscovery();
   lb.Join("127.0.0.1", irlink::PORT, "Side B");
