@@ -10,6 +10,7 @@ Plays PocketStation mini-games on the PC and serves the virtual card on the netw
 
 - **Play**: arrows or the d-pad, Z / Enter / Space or controller A for Fire. F2 or controller Back: Reset. LB / RB: Play / Cards.
 - **Cards**: the card lives in `PocketStation.mcd` beside the exe and saves itself. Drop `.mcs` saves or mini-games on the window to add them; drop a whole card (`.mcd .mcr .gme ...`) to swap it in (the old one is kept as `.bak`).
+- **Alerts**: when a game calls (it beeps out of a quiet spell while nobody is playing, or lights its LED), the app shows who's calling and flashes in the taskbar. Chocobo World is read from its save and says what happened: an event is waiting, Boko levelled up, ranked up, found an item, lost a battle. The rules live in `alerts.cpp`; `tools/alerts_run` plays an app untouched and prints its alerts.
 - **Network card**: TCP port 7550 (`port=` in `mcps.ini`). Whole commands come in as `card_raw HEX` and run through the emulated card bus at console timing; replies match Phosphor's API. The unit docks while a console talks to it and undocks 3 s later.
 
 ## Build

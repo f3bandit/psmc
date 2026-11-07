@@ -11,6 +11,11 @@
     <!-- The network memory card: a console (Phosphor on the SS1) connects to the phone. -->
     <uses-permission android:name="android.permission.INTERNET" />
     <uses-permission android:name="android.permission.VIBRATE" />
+    <!-- Games calling while the app is put away: notifications, and a foreground service so the
+         PocketStation keeps running (RunService). -->
+    <uses-permission android:name="android.permission.POST_NOTIFICATIONS" />
+    <uses-permission android:name="android.permission.FOREGROUND_SERVICE" />
+    <uses-permission android:name="android.permission.FOREGROUND_SERVICE_SPECIAL_USE" />
 
     <application android:label="@string/app_name"
         android:icon="@mipmap/ic_launcher"
@@ -36,5 +41,11 @@
                 <data android:scheme="content" android:mimeType="application/octet-stream" />
             </intent-filter>
         </activity>
+        <service android:name="com.f3bandit.mcps.RunService"
+            android:exported="false"
+            android:foregroundServiceType="specialUse">
+            <property android:name="android.app.PROPERTY_SPECIAL_USE_FGS_SUBTYPE"
+                android:value="Keeps an emulated PocketStation (a pocket game device) running so its clock and games carry on and can alert the user, as the real device does in a pocket." />
+        </service>
     </application>
 </manifest>

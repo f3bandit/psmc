@@ -7,7 +7,11 @@
 // native side only ever sees plain paths.
 package com.f3bandit.mcps;
 
+import android.Manifest;
+import android.app.NotificationManager;
 import android.content.Intent;
+import android.content.pm.PackageManager;
+import android.os.Build;
 import android.database.Cursor;
 import android.net.Uri;
 import android.os.Bundle;
@@ -38,7 +42,43 @@ public class MCPSActivity extends SDLActivity {
     @Override
     protected void onCreate(Bundle state) {
         super.onCreate(state);
+        RunService.channels(this);
+        if (Build.VERSION.SDK_INT >= 33 && checkSelfPermission(Manifest.permission.POST_NOTIFICATIONS) != PackageManager.PERMISSION_GRANTED)
+            requestPermissions(new String[] { Manifest.permission.POST_NOTIFICATIONS }, 1);
         handleView(getIntent());
+    }
+
+    // Put away: keep the PocketStation running (RunService). Back in front: no need.
+    @Override
+    protected void onPause() {
+        super.onPause();
+        try {
+            Intent i = new Intent(this, RunService.class);
+            if (Build.VERSION.SDK_INT >= 26) startForegroundService(i);
+            else startService(i);
+        } catch (Exception ignored) { }
+    }
+
+    @Override
+    protected void onResume() {
+        super.onResume();
+        stopService(new Intent(this, RunService.class));
+    }
+
+    private static int nextAlert = 1;
+
+    // Called from native code: a game is calling (app/alerts.hpp).
+    public static void postAlert(String title, String text) {
+        final MCPSActivity a = (MCPSActivity) mSingleton;
+        if (a == null) return;
+        android.app.Notification n = RunService.builder(a, RunService.ALERTS)
+                .setSmallIcon(R.drawable.ic_stat)
+                .setContentTitle(title)
+                .setContentText(text)
+                .setContentIntent(RunService.open(a))
+                .setAutoCancel(true)
+                .build();
+        a.getSystemService(NotificationManager.class).notify(0x100 + (nextAlert++ & 0xFF), n);
     }
 
     @Override

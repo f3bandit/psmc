@@ -4,6 +4,11 @@ The same app as the Windows build (`app/main.cpp`, SDL2 + Dear ImGui) running on
 activity. `MCPSActivity` adds the Android parts: the system file picker for a BIOS, cards and saves,
 the "save to" dialog for exports, and opening files from other apps.
 
+Put away, the PocketStation keeps running (a foreground service with a quiet "PocketStation is
+running" notification keeps Android from freezing it), and games calling come up as notifications:
+see Alerts in `app/README.md`. Time the phone spends asleep is run through quickly when it wakes,
+so events in it still arrive.
+
 Your own PocketStation BIOS is needed, as on Windows. Pick it with **Choose BIOS…** on the
 Cards page, or copy it to the app's folder (`Android/data/com.f3bandit.mcps/files/`) by USB.
 The card, settings and the saved unit live in that folder too.

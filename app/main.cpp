@@ -24,6 +24,7 @@
 #include "imgui_impl_sdlrenderer2.h"
 
 #include "../emu/pocketstation.hpp"
+#include "alerts.hpp"
 #include "card.hpp"
 #include "net.hpp"
 
@@ -81,7 +82,7 @@ namespace fs = std::filesystem;
 using ps::u8;
 
 static const char* APP_NAME = "MC/PS MemCard Pro";
-static const char* APP_VERSION = "0.1.10";
+static const char* APP_VERSION = "0.1.11";
 #ifdef __ANDROID__
 #define ON_THIS_DEVICE "on this phone"
 #define ON_THIS_DEVICE_CAPS "ON THIS PHONE"
@@ -287,17 +288,17 @@ struct App {
     if (cfg.serial != v) { cfg.serial = v; cfg.Save(); }
   }
   void Bind() {
-    if (cfg.unlock && card::BindApps(cardimg, Serial())) { card::Save(CardPath(), cardimg); m.LoadCard(cardimg); }
+    if (cfg.unlock && card::BindApps(cardimg, Serial())) { card::Save(CardPath(), cardimg); m.LoadCard(cardimg); watcher.Reset(); }
   }
 
   void PowerOn() {
-    m.LoadCard(cardimg);
+    m.LoadCard(cardimg); watcher.Reset();
     home.clear();
     LoadHome();
     if (RestoreState()) { GiveSerial(); Bind(); return; }
     GiveSerial();
     Bind();
-    m.LoadCard(cardimg);
+    m.LoadCard(cardimg); watcher.Reset();
     m.Reset();
     clock_sync_at = now + 1.0;   // once the kernel has finished starting up
   }
@@ -376,7 +377,9 @@ struct App {
   // over whatever is now on the card), so dropping a file in a game exits it first.
   float in_game = 0;                 // 1 while a game owns the unit
   double speaker_until = 0;          // the speaker indicator stays lit until then
-  long long background_wall = 0;     // when the app was put away (phones)
+  bool background = false;           // put away, still running (phones)
+  SDL_Window* window = nullptr;
+  alerts::Watcher watcher;           // games calling: see alerts.hpp
   double kernel_since = -1;
   std::vector<u8> home;              // the unit at the clock
   std::vector<u8> candidate;         // the next one, until a second later proves it
@@ -440,7 +443,7 @@ struct App {
   // unit and do what a person would, quickly: past the greeting, the clock from the PC (5Ch),
   // then hold Up into setting mode and confirm each field so the kernel counts it as set.
   void ColdReturn() {
-    m.LoadCard(cardimg);
+    m.LoadCard(cardimg); watcher.Reset();
     m.Reset();
     auto press = [&](u8 mask, double hold) { m.SetButtons(mask); m.RunFor(hold); m.SetButtons(0); m.RunFor(0.5); };
     m.RunFor(1.0);
@@ -463,7 +466,7 @@ struct App {
     if (!m.LoadState(home)) return false;
     m.sig.serial_lo = serial & 0xFFFF;   // the unit is the same one
     m.sig.serial_hi = serial >> 16;
-    m.LoadCard(cardimg);
+    m.LoadCard(cardimg); watcher.Reset();
     AdvanceClock((long long)time(nullptr) - home_wall);
     home_wall = (long long)time(nullptr);
     home = m.SaveState();
@@ -480,7 +483,7 @@ struct App {
     memcpy(&wall, &d[12], 8);
     if (h != Fnv(bios_rom)) return false;   // saved with another BIOS: start fresh
     if (!m.LoadState(std::vector<u8>(d.begin() + 20, d.end()))) return false;
-    m.LoadCard(cardimg);
+    m.LoadCard(cardimg); watcher.Reset();
     AdvanceClock((long long)time(nullptr) - wall);
     Rescan();   // the card file may have changed while the app was closed
     return true;
@@ -554,7 +557,7 @@ struct App {
       cardimg = img;
       if (cfg.unlock) card::BindApps(cardimg, Serial());
       card::Save(CardPath(), cardimg);
-      m.LoadCard(cardimg);
+      m.LoadCard(cardimg); watcher.Reset();
       Rescan();
       Note("Card loaded from " + fs::path(path).filename().string() + " (the previous card is in " + fs::path(CardPath()).filename().string() + ".bak)");
       return;
@@ -566,7 +569,7 @@ struct App {
     cardimg = img;
     if (cfg.unlock) card::BindApps(cardimg, Serial());
     card::Save(CardPath(), cardimg);
-    m.LoadCard(cardimg);
+    m.LoadCard(cardimg); watcher.Reset();
     Rescan();
     Note("Added " + fs::path(path).filename().string() + " to the card");
   }
@@ -595,24 +598,41 @@ struct App {
     return b;
   }
 
-  void Step(double dt, const u8* keys) {
+  // A game is calling: in the app, and as a notification when the app isn't in front.
+  void Deliver(const alerts::Alert& a) {
+    Note(a.title + ": " + a.text);
+#ifdef __ANDROID__
+    if (background) AndroidCallStatic("postAlert", "(Ljava/lang/String;Ljava/lang/String;)V", a.title, a.text);
+#else
+    if (window && !(SDL_GetWindowFlags(window) & SDL_WINDOW_INPUT_FOCUS)) SDL_FlashWindow(window, SDL_FLASH_UNTIL_FOCUSED);
+#endif
+  }
+
+  void Step(double dt, const u8* keys, double cap = 0.1) {
     now += dt;
     if (!have_bios) return;
-    m.SetButtons(Buttons(keys));
+    u8 held = Buttons(keys);
+    m.SetButtons(held);
     if (docked && now >= undock_at) { docked = false; m.SetDocked(false); }
     if (clock_sync_at >= 0 && now >= clock_sync_at) { clock_sync_at = -1; SyncClock(); }
-    m.RunFor(std::min(dt, 0.1));
+    m.RunFor(std::min(dt, cap));
     TrackHome();
     if (state_save_at < 0) state_save_at = now + 30;
     if (now >= state_save_at) { SaveState(); state_save_at = now + 30; }
     if (m.CardDirty()) { cardimg = m.Card(); card_save_at = now + 1.0; }
     if (card_save_at >= 0 && now >= card_save_at) { card::Save(CardPath(), cardimg); card_save_at = -1; }
     server.Poll();
+    bool sound = false;
     {
       // The speaker indicator follows the sound itself: lit while samples moved recently.
       const auto& pending = m.audio;
       for (size_t i = 1; i < pending.size(); i++)
-        if (pending[i] != pending[i - 1]) { speaker_until = now + 0.25; break; }
+        if (pending[i] != pending[i - 1]) { speaker_until = now + 0.25; sound = true; break; }
+    }
+    {
+      std::vector<alerts::Alert> calls;
+      watcher.Poll(m, now, sound, held != 0, calls);
+      for (auto& a : calls) Deliver(a);
     }
     if (audio && !cfg.mute) {
       auto a = m.TakeAudio();
@@ -796,7 +816,7 @@ struct App {
     ImGui::SetCursorScreenPos(ImVec2(x0 + iw - 70 * s, y - 5 * s));
     ImGui::PushStyleColor(ImGuiCol_Button, ImVec4(0, 0, 0, 0));
     ImGui::PushStyleColor(ImGuiCol_Text, ColV(TEXT3));
-    if (ImGui::Button("Reset", ImVec2(70 * s, 26 * s)) && have_bios) { m.LoadCard(cardimg); m.Reset(); }
+    if (ImGui::Button("Reset", ImVec2(70 * s, 26 * s)) && have_bios) { m.LoadCard(cardimg); watcher.Reset(); m.Reset(); }
     if (InGame()) {
       ImGui::SetCursorScreenPos(ImVec2(x0 + iw - 170 * s, y - 5 * s));
       if (ImGui::Button("Exit game", ImVec2(96 * s, 26 * s)) && !ExitGame())
@@ -1121,6 +1141,11 @@ int main(int argc, char** argv) {
     }
   }
 
+#ifdef __ANDROID__
+  // Keep running when put away: a PocketStation's games carry on in your pocket, and they call
+  // you (alerts.hpp). MCPSActivity keeps a foreground service up meanwhile so Android lets us.
+  SDL_SetHint(SDL_HINT_ANDROID_BLOCK_ON_PAUSE, "0");
+#endif
   if (SDL_Init(SDL_INIT_VIDEO | SDL_INIT_AUDIO | SDL_INIT_GAMECONTROLLER | SDL_INIT_TIMER) != 0) {
     fprintf(stderr, "SDL: %s\n", SDL_GetError());
     return 1;
@@ -1151,6 +1176,7 @@ int main(int argc, char** argv) {
   fc.FontDataOwnedByAtlas = false;
   io.Fonts->AddFontFromMemoryCompressedTTF(inter_regular_compressed_data, inter_regular_compressed_size, 15, &fc);
   App app;
+  app.window = win;
   app.font_bold = io.Fonts->AddFontFromMemoryCompressedTTF(inter_semibold_compressed_data, inter_semibold_compressed_size, 16, &fc);
   app.font_big = io.Fonts->AddFontFromMemoryCompressedTTF(inter_semibold_compressed_data, inter_semibold_compressed_size, 26, &fc);
   Style();
@@ -1214,11 +1240,11 @@ int main(int argc, char** argv) {
       if (e.type == SDL_APP_WILLENTERBACKGROUND || e.type == SDL_APP_TERMINATING) {
         if (app.card_save_at >= 0) { card::Save(app.CardPath(), app.cardimg); app.card_save_at = -1; }
         app.SaveState();
-        app.background_wall = (long long)time(nullptr);
+        app.background = true;
+        if (app.audio) SDL_ClearQueuedAudio(app.audio);
       }
-      if (e.type == SDL_APP_DIDENTERFOREGROUND && app.background_wall) {
-        app.AdvanceClock((long long)time(nullptr) - app.background_wall);
-        app.background_wall = 0;
+      if (e.type == SDL_APP_DIDENTERFOREGROUND) {
+        app.background = false;
         last = std::chrono::steady_clock::now();
       }
       if (e.type == SDL_KEYDOWN && e.key.keysym.scancode == SDL_SCANCODE_AC_BACK) app.page = 0;
@@ -1237,6 +1263,39 @@ int main(int argc, char** argv) {
       if (e.type == SDL_CONTROLLERBUTTONDOWN && e.cbutton.button == SDL_CONTROLLER_BUTTON_LEFTSHOULDER) app.page = 0;
       if (e.type == SDL_CONTROLLERBUTTONDOWN && e.cbutton.button == SDL_CONTROLLER_BUTTON_RIGHTSHOULDER) app.page = 1;
     }
+#ifdef __ANDROID__
+    {
+      // Wall time, counting time asleep: the emulation owes what the phone slept through.
+      struct timespec ts;
+      clock_gettime(CLOCK_BOOTTIME, &ts);
+      double wall = ts.tv_sec + ts.tv_nsec * 1e-9;
+      double mono = std::chrono::duration<double>(std::chrono::steady_clock::now().time_since_epoch()).count();
+      static double last_wall = wall, last_mono = mono;
+      static double owed = 0;
+      double gap = wall - last_wall, awake = mono - last_mono;
+      last_wall = wall;
+      last_mono = mono;
+      if (app.background) owed += gap;
+      else owed += std::max(0.0, gap - awake - 0.05);   // asleep in front (screen off): the steady clock missed it
+      if (owed > 12 * 3600.0) { app.AdvanceClock((long long)(owed - 1)); owed = 1; }   // too far to run through
+      if (owed > 0) {
+        // Run the owed time fast, a slice at a time, so the alerts it raises still come out.
+        static const u8 no_keys[SDL_NUM_SCANCODES] = {};
+        auto t0 = std::chrono::steady_clock::now();
+        while (owed > 0 && std::chrono::steady_clock::now() - t0 < std::chrono::milliseconds(app.background ? 40 : 8)) {
+          double d = std::min(owed, 0.5);
+          app.Step(d, no_keys, d);
+          owed -= d;
+        }
+      }
+      if (app.background) {
+        SDL_Delay(owed > 0 ? 1 : 200);
+        last = std::chrono::steady_clock::now();
+        continue;   // nothing to draw
+      }
+      // In front, gaps above are owed time; the steady clock below covers the rest.
+    }
+#endif
     auto t = std::chrono::steady_clock::now();
     double dt = std::chrono::duration<double>(t - last).count();
     last = t;
