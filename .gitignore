@@ -15,3 +15,10 @@ emu/*.exe
 app/mcps
 app/*.exe
 app/*_preview.png
+android/.gradle/
+android/build/
+android/app/build/
+android/app/.cxx/
+android/local.properties
+*.apk
+*.keystore

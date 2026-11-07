@@ -36,11 +36,59 @@
 #include <commdlg.h>
 #endif
 
+#ifdef __ANDROID__
+// Android: the system file picker and "save to" dialog live in MCPSActivity (Java); picked files
+// arrive here as paths in the app's own folder, on the UI thread, and are taken up by the loop.
+#include <jni.h>
+#include <mutex>
+static std::mutex g_android_mu;
+static std::vector<std::string> g_android_files, g_android_notes;
+
+extern "C" JNIEXPORT void JNICALL Java_com_f3bandit_mcps_MCPSActivity_nativeFilePicked(JNIEnv* env, jclass, jstring path) {
+  const char* c = env->GetStringUTFChars(path, nullptr);
+  std::lock_guard<std::mutex> lk(g_android_mu);
+  g_android_files.push_back(c);
+  env->ReleaseStringUTFChars(path, c);
+}
+extern "C" JNIEXPORT void JNICALL Java_com_f3bandit_mcps_MCPSActivity_nativeNote(JNIEnv* env, jclass, jstring text) {
+  const char* c = env->GetStringUTFChars(text, nullptr);
+  std::lock_guard<std::mutex> lk(g_android_mu);
+  g_android_notes.push_back(c);
+  env->ReleaseStringUTFChars(text, c);
+}
+
+static void AndroidCallStatic(const char* method, const char* sig, const std::string& a = "", const std::string& b = "") {
+  JNIEnv* env = (JNIEnv*)SDL_AndroidGetJNIEnv();
+  jobject activity = (jobject)SDL_AndroidGetActivity();
+  if (!env || !activity) return;
+  jclass cls = env->GetObjectClass(activity);
+  jmethodID mid = env->GetStaticMethodID(cls, method, sig);
+  if (mid) {
+    if (a.empty() && b.empty()) env->CallStaticVoidMethod(cls, mid);
+    else {
+      jstring ja = env->NewStringUTF(a.c_str()), jb = env->NewStringUTF(b.c_str());
+      env->CallStaticVoidMethod(cls, mid, ja, jb);
+      env->DeleteLocalRef(ja);
+      env->DeleteLocalRef(jb);
+    }
+  }
+  env->DeleteLocalRef(cls);
+  env->DeleteLocalRef(activity);
+}
+#endif
+
 namespace fs = std::filesystem;
 using ps::u8;
 
 static const char* APP_NAME = "MC/PS MemCard Pro";
 static const char* APP_VERSION = "0.1.10";
+#ifdef __ANDROID__
+#define ON_THIS_DEVICE "on this phone"
+#define ON_THIS_DEVICE_CAPS "ON THIS PHONE"
+#else
+#define ON_THIS_DEVICE "on this PC"
+#define ON_THIS_DEVICE_CAPS "ON THIS PC"
+#endif
 
 // Colours from the app mockup.
 static ImU32 Col(unsigned rgb, int a = 255) { return IM_COL32((rgb >> 16) & 255, (rgb >> 8) & 255, rgb & 255, a); }
@@ -120,6 +168,10 @@ static std::string OpenFileDialog(const char* filter_desc, const char* patterns)
   char out[4096];
   WideCharToMultiByte(CP_UTF8, 0, file, -1, out, sizeof out, nullptr, nullptr);
   return out;
+#elif defined(__ANDROID__)
+  (void)filter_desc; (void)patterns;
+  AndroidCallStatic("pickFile", "()V");   // the file arrives later, through Open()
+  return "";
 #else
   (void)filter_desc; (void)patterns;
   return "";   // Linux builds are for testing: drop files on the window instead
@@ -174,6 +226,27 @@ struct App {
   ImFont* font_big = nullptr;
 
   void Note(const std::string& s) { note = s; note_until = now + 5; }
+
+  // Writes `data` where the person chooses: a save dialog on Windows, Android's "save to" picker
+  // (from a copy in the app's cache) on a phone.
+  void Export(const char* desc, const char* pattern, const char* ext, const std::string& name, const std::vector<u8>& data) {
+#ifdef __ANDROID__
+    (void)desc; (void)pattern; (void)ext;
+    std::string tmp = dir + "export.tmp";
+    FILE* fo = fopen(tmp.c_str(), "wb");
+    bool ok = fo && fwrite(data.data(), 1, data.size(), fo) == data.size();
+    if (fo) fclose(fo);
+    if (!ok) { Note("Couldn't prepare " + name); return; }
+    AndroidCallStatic("exportFile", "(Ljava/lang/String;Ljava/lang/String;)V", tmp, name);
+#else
+    std::string f = SaveFileDialog(desc, pattern, ext, name);
+    if (f.empty()) return;
+    FILE* fo = fopen(f.c_str(), "wb");
+    bool ok = fo && fwrite(data.data(), 1, data.size(), fo) == data.size();
+    if (fo) fclose(fo);
+    Note(ok ? "Saved " + f : "Couldn't write " + f);
+#endif
+  }
 
   std::string CardPath() const { return cfg.card.empty() ? dir + "PocketStation.mcd" : cfg.card; }
 
@@ -303,6 +376,7 @@ struct App {
   // over whatever is now on the card), so dropping a file in a game exits it first.
   float in_game = 0;                 // 1 while a game owns the unit
   double speaker_until = 0;          // the speaker indicator stays lit until then
+  long long background_wall = 0;     // when the app was put away (phones)
   double kernel_since = -1;
   std::vector<u8> home;              // the unit at the clock
   std::vector<u8> candidate;         // the next one, until a second later proves it
@@ -720,7 +794,7 @@ struct App {
       ImGui::PushStyleColor(ImGuiCol_Text, ColV(LCD_BG));
       if (ImGui::Button("Choose file...", ImVec2(140 * s, 34 * s))) {
         std::string f = OpenFileDialog("PocketStation BIOS (16 KB)", "*.bin;*.rom");
-        if (!f.empty()) UseBios(f);
+        if (!f.empty()) Open(f);
       }
       ImGui::PopStyleColor(2);
     }
@@ -783,7 +857,7 @@ struct App {
     ImGui::SetCursorPos(ImVec2(20, 20));
     ImGui::BeginGroup();
     ImGui::PushStyleColor(ImGuiCol_Text, ColV(TEXT3));
-    ImGui::TextUnformatted("ON THIS PC");
+    ImGui::TextUnformatted(ON_THIS_DEVICE_CAPS);
     ImGui::PopStyleColor();
     ImGui::Dummy(ImVec2(0, 4));
     char sub[96];
@@ -798,10 +872,8 @@ struct App {
       std::string f = OpenFileDialog("Single saves", "*.mcs;*.psv;*.psx;*.ps1");
       if (!f.empty()) Open(f);
     }
-    if (ImGui::Button("Save the card as...", ImVec2(280, 34))) {
-      std::string f = SaveFileDialog("Memory card (raw)", "*.mcd", "mcd", "PocketStation.mcd");
-      if (!f.empty()) Note(card::Save(f, cardimg) ? "Card saved to " + f : "Couldn't write " + f);
-    }
+    if (ImGui::Button("Save the card as...", ImVec2(280, 34)))
+      Export("Memory card (raw)", "*.mcd", "mcd", "PocketStation.mcd", cardimg);
     ImGui::Dummy(ImVec2(0, 14));
     ImGui::PushStyleColor(ImGuiCol_Text, ColV(TEXT3));
     ImGui::TextUnformatted("NETWORK CARD");
@@ -818,7 +890,7 @@ struct App {
     ListCard(have_bios ? fs::path(cfg.bios).filename().string().c_str() : "None yet", have_bios ? "Your own dump" : "Drop a 16 KB BIOS file", nullptr, false, 280);
     if (ImGui::Button("Choose BIOS...", ImVec2(280, 34))) {
       std::string f = OpenFileDialog("PocketStation BIOS (16 KB)", "*.bin;*.rom");
-      if (!f.empty()) UseBios(f);
+      if (!f.empty()) Open(f);
     }
     ImGui::EndGroup();
     ImGui::EndChild();
@@ -833,7 +905,7 @@ struct App {
     ImGui::PopFont();
     ImGui::SameLine(0, 14);
     ImGui::PushStyleColor(ImGuiCol_Text, ColV(TEXT3));
-    ImGui::Text("on this PC · %d of 15 blocks used · unit serial %08X", 15 - card::FreeBlocks(cardimg), Serial());
+    ImGui::Text(ON_THIS_DEVICE " · %d of 15 blocks used · unit serial %08X", 15 - card::FreeBlocks(cardimg), Serial());
     ImGui::PopStyleColor();
     // Copy protection: some apps (MGS Integral's) only run on the PocketStation the game
     // installed them on. With this on, such an app is moved over to this unit when it arrives.
@@ -908,16 +980,8 @@ struct App {
       ImGui::PopStyleColor();
       ImGui::Dummy(ImVec2(0, 6));
       ImGui::PushStyleColor(ImGuiCol_Button, ColV(LINE));
-      if (ImGui::Button("Save as .mcs...", ImVec2(150, 34))) {
-        std::string f = SaveFileDialog("Single save", "*.mcs", "mcs", se->product + ".mcs");
-        if (!f.empty()) {
-          auto data = card::ExportSave(cardimg, se->first_block);
-          FILE* fo = fopen(f.c_str(), "wb");
-          bool ok = fo && fwrite(data.data(), 1, data.size(), fo) == data.size();
-          if (fo) fclose(fo);
-          Note(ok ? "Saved " + f : "Couldn't write " + f);
-        }
-      }
+      if (ImGui::Button("Save as .mcs...", ImVec2(150, 34)))
+        Export("Single save", "*.mcs", "mcs", se->product + ".mcs", card::ExportSave(cardimg, se->first_block));
       ImGui::PopStyleColor();
       ImGui::EndGroup();
       ImGui::SetCursorScreenPos(ImVec2(p.x, p.y + 130));
@@ -999,9 +1063,20 @@ int main(int argc, char** argv) {
     return 1;
   }
   SDL_SetHint(SDL_HINT_JOYSTICK_ALLOW_BACKGROUND_EVENTS, "1");
+#ifdef __ANDROID__
+  SDL_SetHint(SDL_HINT_ORIENTATIONS, "LandscapeLeft LandscapeRight");
+  SDL_SetHint(SDL_HINT_ANDROID_TRAP_BACK_BUTTON, "1");
+  SDL_SetHint(SDL_HINT_TOUCH_MOUSE_EVENTS, "1");
+#endif
   std::string title = std::string(APP_NAME) + " " + APP_VERSION + " — PocketStation";
+#ifdef __ANDROID__
+  SDL_Window* win = SDL_CreateWindow(title.c_str(), 0, 0, 0, 0, SDL_WINDOW_FULLSCREEN | SDL_WINDOW_ALLOW_HIGHDPI);
+#elif defined(MCPS_PHONE_LAYOUT)   // desktop check of the phone layout: a 20:9 phone screen
+  SDL_Window* win = SDL_CreateWindow(title.c_str(), 0, 0, 2400, 1080, 0);
+#else
   SDL_Window* win = SDL_CreateWindow(title.c_str(), SDL_WINDOWPOS_CENTERED, SDL_WINDOWPOS_CENTERED, 1280, 820,
                                      SDL_WINDOW_RESIZABLE | SDL_WINDOW_ALLOW_HIGHDPI);
+#endif
   SDL_Renderer* ren = SDL_CreateRenderer(win, -1, SDL_RENDERER_PRESENTVSYNC | SDL_RENDERER_ACCELERATED);
   if (!ren) ren = SDL_CreateRenderer(win, -1, SDL_RENDERER_SOFTWARE);
 
@@ -1019,9 +1094,17 @@ int main(int argc, char** argv) {
   ImGui_ImplSDL2_InitForSDLRenderer(win, ren);
   ImGui_ImplSDLRenderer2_Init(ren);
 
+#ifdef __ANDROID__
+  // The app's own folder on shared storage (Android/data/com.f3bandit.mcps/files): settings, the
+  // card and the saved unit live here, and a BIOS copied here by USB is found like beside the exe.
+  const char* ext_dir = SDL_AndroidGetExternalStoragePath();
+  app.dir = std::string(ext_dir ? ext_dir : SDL_AndroidGetInternalStoragePath()) + "/";
+  fs::create_directories(app.dir);
+#else
   char* base = SDL_GetBasePath();
   app.dir = base ? base : "./";
   SDL_free(base);
+#endif
   app.cfg.Load(app.dir + "mcps.ini");
   if (!card_arg.empty()) app.cfg.card = card_arg;
   app.LoadCardFile();
@@ -1062,6 +1145,20 @@ int main(int argc, char** argv) {
       ImGui_ImplSDL2_ProcessEvent(&e);
       if (e.type == SDL_QUIT) run = false;
       if (e.type == SDL_DROPFILE) { app.Open(e.drop.file); SDL_free(e.drop.file); }
+      // Phones and tablets: the app can be put away or closed at any moment. Save the unit and
+      // the card on the way out, and on return move the clock on by the time away (the emulation
+      // doesn't run in the background, a real unit's clock does).
+      if (e.type == SDL_APP_WILLENTERBACKGROUND || e.type == SDL_APP_TERMINATING) {
+        if (app.card_save_at >= 0) { card::Save(app.CardPath(), app.cardimg); app.card_save_at = -1; }
+        app.SaveState();
+        app.background_wall = (long long)time(nullptr);
+      }
+      if (e.type == SDL_APP_DIDENTERFOREGROUND && app.background_wall) {
+        app.AdvanceClock((long long)time(nullptr) - app.background_wall);
+        app.background_wall = 0;
+        last = std::chrono::steady_clock::now();
+      }
+      if (e.type == SDL_KEYDOWN && e.key.keysym.scancode == SDL_SCANCODE_AC_BACK) app.page = 0;
       if (e.type == SDL_CONTROLLERDEVICEADDED && !app.pad) app.pad = SDL_GameControllerOpen(e.cdevice.which);
       if (e.type == SDL_CONTROLLERDEVICEREMOVED && app.pad &&
           SDL_JoystickInstanceID(SDL_GameControllerGetJoystick(app.pad)) == e.cdevice.which) {
@@ -1089,6 +1186,30 @@ int main(int argc, char** argv) {
 
     ImGui_ImplSDLRenderer2_NewFrame();
     ImGui_ImplSDL2_NewFrame();
+#if defined(__ANDROID__) || defined(MCPS_PHONE_LAYOUT)
+    {
+      // Lay the app out at 820 points tall, as on a desktop window, and as wide as the screen's
+      // shape allows; SDL scales the drawing and the touches to the real screen.
+      int ww, wh;
+      SDL_GetRendererOutputSize(ren, &ww, &wh);
+      float lw = 820.0f * ww / std::max(1, wh);
+      SDL_RenderSetLogicalSize(ren, (int)lw, 820);
+      io.DisplaySize = ImVec2(lw, 820);
+      io.DisplayFramebufferScale = ImVec2(1, 1);
+    }
+#endif
+#ifdef __ANDROID__
+    {
+      std::vector<std::string> files, notes;
+      {
+        std::lock_guard<std::mutex> lk(g_android_mu);
+        files.swap(g_android_files);
+        notes.swap(g_android_notes);
+      }
+      for (auto& f : files) app.Open(f);
+      for (auto& n : notes) app.Note(n);
+    }
+#endif
     ImGui::NewFrame();
     app.Frame();
     ImGui::Render();

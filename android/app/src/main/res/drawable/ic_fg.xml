@@ -1,0 +1,11 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- A PocketStation: body, screen, d-pad and Fire, in the app's colours. -->
+<vector xmlns:android="http://schemas.android.com/apk/res/android"
+    android:width="108dp" android:height="108dp" android:viewportWidth="108" android:viewportHeight="108">
+    <path android:fillColor="#1D1D22" android:strokeColor="#FFB547" android:strokeWidth="2"
+        android:pathData="M38,26 h32 a6,6 0 0 1 6,6 v44 a6,6 0 0 1 -6,6 h-32 a6,6 0 0 1 -6,-6 v-44 a6,6 0 0 1 6,-6 z" />
+    <path android:fillColor="#C9CCB5" android:pathData="M39,33 h30 v24 h-30 z" />
+    <path android:fillColor="#25261F" android:pathData="M45,39 h4 v4 h-4 z M51,39 h4 v4 h-4 z M57,43 h4 v8 h-4 z M45,47 h10 v4 h-10 z" />
+    <path android:fillColor="#3A3A42" android:pathData="M42,66 h4 v-4 h4 v4 h4 v4 h-4 v4 h-4 v-4 h-4 z" />
+    <path android:fillColor="#FFB547" android:pathData="M66,68 m-5,0 a5,5 0 1 0 10,0 a5,5 0 1 0 -10,0" />
+</vector>
