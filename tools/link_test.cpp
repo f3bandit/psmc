@@ -153,6 +153,8 @@ int main(int argc, char** argv) {
     for (int x = 0; x < 32; x++) putchar(fb[y][x] ? '#' : '.');
     putchar('\n');
   }
+  printf("--- side A's link monitor ---\n");
+  for (auto& l : la.log) printf("%s\n", l.c_str());
   la.Stop("test done");
   for (int i = 0; i < 10; i++) { lb.Poll(wall, ub, bios); wall += 0.01; }
   printf("after the end: B says \"%s\"\n", lb.status.c_str());

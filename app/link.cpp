@@ -4,6 +4,7 @@
 
 #include <algorithm>
 #include <cerrno>
+#include <ctime>
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
@@ -172,6 +173,7 @@ bool Link::Join(const std::string& ip, int port, const std::string& name) {
 }
 
 void Link::Stop(const std::string& why) {
+  if (state == RUNNING) Log("LINK END  " + (why.empty() ? std::string("(no reason)") : why));
   if (connected_ && sock_ >= 0) {
     // Say goodbye if the socket takes it; never wait, never fail over it.
     connected_ = false;
@@ -482,6 +484,40 @@ void Link::Handle(uint8_t type, const std::vector<uint8_t>& p, ps::PocketStation
   if (state == STARTING && sent_start_ && got_start_) Start(own, bios);
 }
 
+void Link::Log(const std::string& line) {
+  char ts[32];
+  time_t now = time(nullptr);
+  strftime(ts, sizeof ts, "%H:%M:%S", localtime(&now));
+  char pre[64];
+  snprintf(pre, sizeof pre, "%s  t%-6u %6.2fs  ", ts, tick_, pair_us_ / 1e6);
+  std::string l = pre + line;
+  log.push_back(l);
+  if (log.size() > 300) log.erase(log.begin(), log.begin() + 100);
+  if (!log_path.empty()) {
+    if (FILE* f = fopen(log_path.c_str(), "ab")) { fprintf(f, "%s\n", l.c_str()); fclose(f); }
+  }
+}
+
+void Link::Watch(IrWatch& w, ps::PocketStation& u, const std::string& who) {
+  // The transmitter switched on (its light then blinks with the data), or the receiver on.
+  bool tx_on = (u.irda_static & 1) && !(u.irda_static & 2);
+  int mode = tx_on ? 2 : u.IrListening() ? 1 : 0;
+  if (mode != w.mode) {
+    static const char* names[] = {"infrared off", "receiver on (listening)", "transmitter on"};
+    Log(who + ": " + names[mode]);
+    w.mode = mode;
+  }
+  bool light = u.IrSending();
+  if (light != w.light) {
+    if (w.first_us < 0) w.first_us = pair_us_;
+    if (w.widths.size() < 48 && w.edge_us) w.widths.push_back((int)(w.light ? pair_us_ - w.edge_us : -(pair_us_ - w.edge_us)));
+    if (light) w.pulses++;
+    w.edge_us = pair_us_;
+    w.last_us = pair_us_;
+    w.light = light;
+  }
+}
+
 void Link::Start(ps::PocketStation& own, const std::vector<uint8_t>& bios) {
   // Both sides load both units from what was sent, the same way, so the copies match exactly.
   own.LoadCard(my_card_);
@@ -503,13 +539,28 @@ void Link::Start(ps::PocketStation& own, const std::vector<uint8_t>& bios) {
   start_wall_ = -1;
   state = RUNNING;
   status = "Linked with " + peer_name;
+  wa_ = IrWatch();
+  wb_ = IrWatch();
+  ir_session_ = false;
+  stall_since_ = -1;
+  auto crc = [](ps::PocketStation& u) { auto st = u.SaveState(); return Crc32(st.data(), st.size()); };
+  char line[256];
+  snprintf(line, sizeof line, "LINK START  A = %s (waited for the link), B = %s (joined)  peer %s  start states A %08x B %08x",
+           NameA().c_str(), NameB().c_str(), peer_ip.c_str(), crc(a), crc(b));
+  Log("");
+  Log(line);
+}
+
+// A unit with its infrared in use: transmitter or receiver switched on.
+static bool IrOn(const ps::PocketStation& u) {
+  return ((u.irda_static & 1) && !(u.irda_static & 2)) || u.IrListening();
 }
 
 void Link::StepPair(ps::PocketStation& a, ps::PocketStation& b, int64_t until_us) {
   // As two units face to face: each one's receiver sees the other's emitter. While either has
   // its infrared on, in 100 us slices (a bit is about 2 ms); otherwise a whole tick at once.
   while (pair_us_ < until_us) {
-    bool ir = a.IrSending() || a.IrListening() || b.IrSending() || b.IrListening();
+    bool ir = IrOn(a) || IrOn(b);
     int64_t s = ir ? std::min<int64_t>(100, until_us - pair_us_) : until_us - pair_us_;
     bool la = a.IrSending(), lb = b.IrSending();
     a.ir_light = lb;
@@ -523,6 +574,38 @@ void Link::StepPair(ps::PocketStation& a, ps::PocketStation& b, int64_t until_us
     uint64_t d = q * 8187281408ull + r * 8187281408ull / 15625;
     a.RunUntil(base_a_ + d);
     b.RunUntil(base_b_ + d);
+    if (ir || IrOn(a) || IrOn(b)) {
+      if (!ir_session_) {
+        ir_session_ = true;
+        session_us_ = pair_us_;
+        wa_.pulses = wb_.pulses = 0;
+        wa_.first_us = wb_.first_us = -1;
+        wa_.widths.clear();
+        wb_.widths.clear();
+        wa_.edge_us = wb_.edge_us = 0;
+        Log("IR session starts");
+      }
+      Watch(wa_, a, "A " + NameA());
+      Watch(wb_, b, "B " + NameB());
+    } else if (ir_session_) {
+      Watch(wa_, a, "A " + NameA());
+      Watch(wb_, b, "B " + NameB());
+      ir_session_ = false;
+      auto sum = [&](IrWatch& w, const std::string& who) {
+        char l[160];
+        snprintf(l, sizeof l, "  %s sent %d pulses%s", who.c_str(), w.pulses,
+                 w.pulses ? (", over " + std::to_string((w.last_us - w.first_us) / 1000) + " ms").c_str() : "");
+        Log(l);
+        if (!w.widths.empty()) {
+          std::string t = "    first light (+on/-off, us):";
+          for (int x : w.widths) t += " " + std::to_string(x);
+          Log(t);
+        }
+      };
+      Log("IR session ends after " + std::to_string((pair_us_ - session_us_) / 1000) + " ms");
+      sum(wa_, "A " + NameA());
+      sum(wb_, "B " + NameB());
+    }
   }
 }
 
@@ -545,8 +628,19 @@ void Link::Advance(ps::PocketStation& own, uint8_t buttons, double wall) {
   stalled = false;
   while (tick_ < target && n < 8) {
     if (theirs_.size() <= tick_) { stalled = true; break; }
-    a.SetButtons(host_ ? mine_[tick_] : theirs_[tick_]);
-    b.SetButtons(host_ ? theirs_[tick_] : mine_[tick_]);
+    uint8_t ba = host_ ? mine_[tick_] : theirs_[tick_], bb = host_ ? theirs_[tick_] : mine_[tick_];
+    auto press = [&](IrWatch& w, uint8_t v, const std::string& who) {
+      if (v == w.buttons) return;
+      static const char* nm[] = {"Fire", "Right", "Left", "Down", "Up"};
+      std::string l = who + " presses";
+      for (int i = 0; i < 5; i++) if (v & ~w.buttons & (1 << i)) l += std::string(" ") + nm[i];
+      if (v & ~w.buttons) Log(l);
+      w.buttons = v;
+    };
+    press(wa_, ba, "A " + NameA());
+    press(wb_, bb, "B " + NameB());
+    a.SetButtons(ba);
+    b.SetButtons(bb);
     tick_++;
     StepPair(a, b, (int64_t)tick_ * 1000000 / 60);
     n++;
@@ -560,6 +654,11 @@ void Link::Advance(ps::PocketStation& own, uint8_t buttons, double wall) {
       Send(M_CHECK, p);
     }
   }
+  if (stalled && stall_since_ < 0) stall_since_ = wall;
+  if (!stalled && stall_since_ >= 0) {
+    if (wall - stall_since_ > 0.3) Log("waited " + std::to_string((int)((wall - stall_since_) * 1000)) + " ms for " + peer_name);
+    stall_since_ = -1;
+  }
   // Behind real time by more than half a second (the other side was slow): don't race to catch
   // up, carry on from here.
   if (target - tick_ > 30) start_wall_ += (target - tick_ - 30) / 60;
@@ -571,7 +670,14 @@ void Link::Advance(ps::PocketStation& own, uint8_t buttons, double wall) {
     if (t.first < m.first) { their_checks_.erase(their_checks_.begin()); continue; }
     my_checks_.erase(my_checks_.begin());
     their_checks_.erase(their_checks_.begin());
-    if (m.second != t.second) { Stop("The two units got out of step; the link was ended (each keeps its own)"); return; }
+    if (m.second != t.second) {
+      char l[128];
+      snprintf(l, sizeof l, "step check at t%u: ours %08x, %s's %08x: MISMATCH", m.first, m.second, peer_name.c_str(), t.second);
+      Log(l);
+      Stop("The two units got out of step; the link was ended (each keeps its own)");
+      return;
+    }
+    if (m.first % 1200 == 0) Log("step check t" + std::to_string(m.first) + ": both sides match");
   }
   Flush();
 }

@@ -120,7 +120,7 @@ namespace fs = std::filesystem;
 using ps::u8;
 
 static const char* APP_NAME = "MC/PS MemCard Pro";
-static const char* APP_VERSION = "0.1.18";
+static const char* APP_VERSION = "0.1.19";
 #ifdef __ANDROID__
 #define ON_THIS_DEVICE "on this phone"
 #define ON_THIS_DEVICE_CAPS "ON THIS PHONE"
@@ -423,7 +423,8 @@ struct App {
   std::string link_name;             // this unit's name on the network
   char link_ip[64] = "";
   double link_panel_at = -1;
-  double relisten_at = 0;         // the Link panel was last drawn then: look for units meanwhile
+  double relisten_at = 0;
+  size_t link_log_seen = 0;         // the Link panel was last drawn then: look for units meanwhile
   bool multicast = false;
   // Anything that changes the unit other than the link itself (a reset, another card, the clock,
   // the console) would make the two sides' copies differ: it ends the link first.
@@ -720,6 +721,29 @@ struct App {
                                                 : "Connecting...";
       ListCard(lnk.status.c_str(), sub.c_str(), nullptr, lnk.state == L::RUNNING, w);
       if (ImGui::Button(lnk.state == L::RUNNING ? "End link" : "Cancel", ImVec2(w, 40))) lnk.Stop("Link ended");
+    }
+    // The link monitor: both units' presses and infrared, the checks, how links ended.
+    if (!lnk.log.empty()) {
+      ImGui::Dummy(ImVec2(0, 8));
+      ImGui::PushStyleColor(ImGuiCol_Text, ColV(TEXT3));
+      ImGui::TextUnformatted("LINK MONITOR");
+      ImGui::PopStyleColor();
+      ImGui::PushStyleColor(ImGuiCol_ChildBg, ColV(PANEL));
+      ImGui::BeginChild("linklog", ImVec2(w, 220), ImGuiChildFlags_Borders, ImGuiWindowFlags_HorizontalScrollbar);
+      ImGui::PushStyleColor(ImGuiCol_Text, ColV(TEXT2));
+      ImGui::SetWindowFontScale(0.85f);
+      for (auto& l : lnk.log) ImGui::TextUnformatted(l.c_str());
+      ImGui::SetWindowFontScale(1.0f);
+      ImGui::PopStyleColor();
+      if (lnk.log.size() != link_log_seen) { ImGui::SetScrollHereY(1.0f); link_log_seen = lnk.log.size(); }
+      DragScroll();
+      ImGui::EndChild();
+      ImGui::PopStyleColor();
+      if (ImGui::Button("Save the link log...", ImVec2(w, 34))) {
+        auto d = ReadFile(lnk.log_path);
+        if (d.empty()) Note("Nothing in the link log yet");
+        else Export("Text", "*.txt", "txt", "link.log.txt", d);
+      }
     }
     ImGui::PushStyleColor(ImGuiCol_Text, ColV(TEXT4));
     ImGui::Text("This unit: %s%s%s · visible on the network", link_name.c_str(), ip.empty() ? "" : " · ", ip.c_str());
@@ -1652,6 +1676,7 @@ int main(int argc, char** argv) {
   SDL_free(base);
 #endif
   app.cfg.Load(app.dir + "mcps.ini");
+  app.lnk.log_path = app.dir + "link.log";   // the link monitor, beside the card
   {
     // This unit's name on the network: the phone's model or the PC's name.
 #ifdef __ANDROID__

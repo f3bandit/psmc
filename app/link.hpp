@@ -61,6 +61,13 @@ class Link {
   bool Busy() const { return state != OFF; }
   uint32_t Tick() const { return tick_; }   // 1/60 s steps run together so far
 
+  // The monitor: what happened on the link, for both units (this side runs both): presses,
+  // each unit's infrared (off / listening / sending), the light pulses each way with their
+  // timing, stalls, the step checks, how it ended. The last lines are kept here; with
+  // `log_path` set every line is also appended to that file.
+  std::vector<std::string> log;
+  std::string log_path;
+
   static std::string LocalIp();
 
  private:
@@ -71,6 +78,22 @@ class Link {
   void StepPair(ps::PocketStation& a, ps::PocketStation& b, int64_t until_us);
   void Close();
   void Sweep(double now);
+  void Log(const std::string& line);
+  std::string NameA() const { return host_ ? name_ : peer_name; }
+  std::string NameB() const { return host_ ? peer_name : name_; }
+  // Monitor state: per unit, its IR mode and the pulses of the current infrared session.
+  struct IrWatch {
+    int mode = 0;                       // 0 off, 1 listening, 2 sending
+    bool light = false;
+    uint8_t buttons = 0;
+    int pulses = 0;
+    int64_t first_us = -1, last_us = 0, edge_us = 0;
+    std::vector<int> widths;            // the first pulses and gaps, microseconds (+on, -off)
+  } wa_, wb_;
+  bool ir_session_ = false;
+  int64_t session_us_ = 0;
+  double stall_since_ = -1;
+  void Watch(IrWatch& w, ps::PocketStation& u, const std::string& who);
   struct Pending { long long sock; std::string ip; double since; std::vector<uint8_t> buf; };
   struct Probe { long long sock; std::string ip; double since; bool sent; std::vector<uint8_t> buf; };
   std::vector<Pending> pending_;
