@@ -29,6 +29,7 @@
 #include "card.hpp"
 #include "link.hpp"
 #include "monitor.hpp"
+#include "builtin_kernel.inc"   // our own kernel: no BIOS needed
 #ifndef _WIN32
 #include <unistd.h>   // gethostname
 #endif
@@ -121,7 +122,7 @@ namespace fs = std::filesystem;
 using ps::u8;
 
 static const char* APP_NAME = "MC/PS MemCard Pro";
-static const char* APP_VERSION = "0.1.27";
+static const char* APP_VERSION = "0.1.28";
 #ifdef __ANDROID__
 #define ON_THIS_DEVICE "on this phone"
 #define ON_THIS_DEVICE_CAPS "ON THIS PHONE"
@@ -250,6 +251,7 @@ struct App {
   Settings cfg;
   std::string dir;               // where the exe lives; settings and the default card go here
   bool have_bios = false;
+  bool builtin = false;   // running our own kernel (kernel/), not a BIOS file
   std::vector<u8> cardimg;
   double card_save_at = -1;
   net::Server server;
@@ -297,10 +299,25 @@ struct App {
     m.LoadBios(rom);
     bios_rom = rom;
     have_bios = true;
+    builtin = false;
     cfg.bios = path;
     cfg.Save();
     PowerOn();
     return true;
+  }
+
+  // Our own kernel, built in: the clock, the games, everything but the memory card side when
+  // docked to a console (still to come).
+  void UseBuiltin() {
+    if (have_bios) SaveState();
+    std::vector<u8> rom(kBuiltinKernel, kBuiltinKernel + sizeof kBuiltinKernel);
+    m.LoadBios(rom);
+    bios_rom = rom;
+    have_bios = true;
+    builtin = true;
+    cfg.bios = "builtin";   // kept: a BIOS file beside the app isn't picked up instead
+    cfg.Save();
+    PowerOn();
   }
 
   // A real unit has a serial number from the factory. A new virtual one gets its own, kept in
@@ -678,6 +695,12 @@ struct App {
     EndLink("The link ended: the clock was set");
     time_t tt = time(nullptr);
     tm lt = *localtime(&tt);
+    if (builtin) {   // ours: straight into the clock (its century kept at 04Ah)
+      m.SetClock((u32)(lt.tm_wday + 1) << 24 | (u32)Bcd(lt.tm_hour) << 16 | (u32)Bcd(lt.tm_min) << 8 | Bcd(lt.tm_sec),
+                 (u32)Bcd(lt.tm_year % 100) << 16 | (u32)Bcd(lt.tm_mon + 1) << 8 | Bcd(lt.tm_mday));
+      m.sram[0x4A] = Bcd(19 + lt.tm_year / 100);
+      return;
+    }
     bool was = docked;
     m.SetDocked(true);
     m.RunFor(0.2);
@@ -698,7 +721,7 @@ struct App {
   // after it has been docked. So it gets a brief dock with a harmless ID command (53h).
   void Rescan() {
     EndLink();
-    if (!have_bios) return;
+    if (!have_bios || builtin) return;   // ours looks at the card by itself
     bool was = docked;
     m.SetDocked(true);
     m.RunFor(0.2);
@@ -963,6 +986,7 @@ struct App {
   void StartServer() {
     server.card_raw = [this](const std::vector<unsigned char>& tx, bool& complete) {
       if (lnk.state >= irlink::Link::STARTING) { complete = false; return std::vector<unsigned char>(); }   // linked: the card is away
+      if (builtin) { complete = false; return std::vector<unsigned char>(); }   // ours doesn't answer a console yet
       if (!docked) { docked = true; m.SetDocked(true); }
       undock_at = now + 3.0;   // back to games 3 s after the console stops talking
       auto r = m.CardCommand(tx);
@@ -1570,11 +1594,13 @@ struct App {
     ImGui::TextUnformatted("BIOS");
     ImGui::PopStyleColor();
     ImGui::Dummy(ImVec2(0, 4));
-    ListCard(have_bios ? fs::path(cfg.bios).filename().string().c_str() : "None yet", have_bios ? "Your own dump" : "Drop a 16 KB BIOS file", nullptr, false, sw);
+    if (builtin) ListCard("Built in (MC/PS kernel)", "No BIOS needed. A console can't use the card with it yet", nullptr, false, sw);
+    else ListCard(have_bios ? fs::path(cfg.bios).filename().string().c_str() : "None yet", have_bios ? "Your own dump" : "Drop a 16 KB BIOS file", nullptr, false, sw);
     if (ImGui::Button("Choose BIOS...", ImVec2(sw, 34))) {
       std::string f = OpenFileDialog("PocketStation BIOS (16 KB)", "*.bin;*.rom");
       if (!f.empty()) Open(f);
     }
+    if (!builtin && ImGui::Button("Use the built-in kernel", ImVec2(sw, 34))) UseBuiltin();
 #if !defined(__ANDROID__) && !defined(MCPS_PHONE_LAYOUT)
     ImGui::Dummy(ImVec2(0, 16));
     LinkPanel(sw);   // phones have it on their Link page
@@ -1861,7 +1887,8 @@ int main(int argc, char** argv) {
 
   // The BIOS: the one in the settings, else a 16 KB .bin/.rom beside the exe.
   std::string bios = !bios_arg.empty() ? bios_arg : app.cfg.bios;
-  if (bios.empty() || !fs::exists(bios)) {
+  if (bios == "builtin") bios = "-";
+  else if (bios.empty() || !fs::exists(bios)) {
     bios.clear();
     for (const char* n : {"boot.rom", "J110.bin", "kernel.bin", "POCKSTAT.ROM", "KROM"})
       if (fs::exists(app.dir + n) && fs::file_size(app.dir + n) == 16384) { bios = app.dir + n; break; }
@@ -1872,7 +1899,8 @@ int main(int argc, char** argv) {
         if (e.is_regular_file() && e.file_size() == 16384 && (ext == ".bin" || ext == ".rom")) { bios = e.path().string(); break; }
       }
   }
-  if (!bios.empty()) app.UseBios(bios);
+  if (!bios.empty() && bios != "-") app.UseBios(bios);
+  else app.UseBuiltin();
   app.page = shot_page;
   for (auto& d : drops) app.Open(d);
 

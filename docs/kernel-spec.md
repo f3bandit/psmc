@@ -92,3 +92,22 @@ RAM 200h-7FFh) the kernel can resume from.
 - What the menu shows and keeps (ours can differ; MC/PS's "Exit game" check reads the menu's RAM
   marker and will change to match).
 - MCX1 snapshot resume (no test app uses it yet).
+
+## Status (0.1.28)
+
+`kernel/` builds `mcps-kernel.bin`, built into the app (no BIOS needed; a BIOS file can still be
+chosen). In the 110-file sweep, every app that starts on the real BIOS starts on ours, none
+crashes, and the infrared link checks pass the same (Chocobo World, Chocobo World Enhanced,
+Odetake Chocobo, MGS Integral, Pocket Digimon World). Remaining differences in the sweep are
+games taking other paths for the same timed presses (the two kernels don't take exactly the same
+time per call).
+
+Found on the way, by watching the real BIOS: the program's RAM is cleared before it starts; the
+callbacks live at 0F8h (Rubato writes the IRQ one itself); IRQ callbacks see the interrupted r2-r12
+(games keep a base address in r12); kernel calls mustn't touch the program's stack (MGS reads what
+is left below its stack pointer); ComFlags starts at 70000h; programs find timer reloads 20h, 34Fh,
+FFFFh and the speaker in stand-by; no flash or ROM wait states at any speed; flash and ROM are 16
+bits wide (a byte read is garbage); a program starts when Fire is let go.
+
+Still to do: the memory card side when docked (a console can't use the card yet with ours),
+MCX1 snapshots, setting the clock and alarm in the menu.

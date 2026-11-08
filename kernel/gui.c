@@ -23,7 +23,7 @@ struct Gui {
   u8 count;
   u8 pos;           // 0 = the clock
   u8 prev_buttons;
-  u8 pad;
+  u8 pad;          // Fire pressed on a program: start it on the release
   u32 frame;
 };
 #define G ((struct Gui*)0x260)
@@ -125,9 +125,12 @@ void gui_main(u32 param) {
     u8 n = G->count + 1;
     if (pressed & (1 << I_RIGHT)) G->pos = (u8)((G->pos + 1) % n);
     if (pressed & (1 << I_LEFT)) G->pos = (u8)((G->pos + n - 1) % n);
-    if ((pressed & (1 << I_FIRE)) && G->pos > 0) {
+    if ((pressed & (1 << I_FIRE)) && G->pos > 0) G->pad = 1;
+    // Starts on the release: a program shouldn't find Fire still held from the menu.
+    if (G->pad && !(b & (1 << I_FIRE))) {
+      G->pad = 0;
       u32 idx = G->apps[G->pos - 1];
-      if (swi4(0x08, 1, idx, 0) == idx) swi4(0x09, 0, 0, 0);
+      if (G->pos > 0 && swi4(0x08, 1, idx, 0) == idx) swi4(0x09, 0, 0, 0);
     }
     for (int i = 0; i < 32; i++) G->fb[i] = 0;
     if (G->pos == 0) draw_clock();
