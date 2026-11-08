@@ -4,7 +4,8 @@
 @ Written from the public PocketStation documentation. Kernel RAM (0..1FFh) is laid out as the
 @ apps expect it: the vectors at 00h jump through the handler addresses at 20h; the IRQ stack
 @ tops at 180h and the FIQ stack at 200h; ComFlags at 0C0h, the alarm setting at 0D8h, the SWI
-@ table pointer at 0E0h. Ours: our variables from 040h, and the SWI handler's stack above them
+@ table pointer at 0E0h, the callbacks at 0F8h. Ours: our variables from 040h, and the SWI
+@ handler's stack above them
 @ (060h..0BFh, top 0C0h). Calls never touch the program's own RAM or stack (MGS Integral reads
 @ what's left below its stack pointer and expects it untouched).
 
@@ -62,16 +63,17 @@ handler_addrs:
         .word   reset, undef_entry, swi_entry, pabort_entry, dabort_entry, reset, irq_entry, fiq_entry
 
 @ --- IRQ: the program's callback first (it acknowledges its own), then the kernel's work.
-@ The callback runs in IRQ mode with r0-r3, r12 and lr saved for it.
+@ The callback runs in IRQ mode with r0-r3, r12 and lr saved for it, and finds r2-r12 as the
+@ interrupted code left them (games keep a base address in r12 and their handlers use it).
         .global irq_entry
 irq_entry:
         sub     lr, lr, #4
         stmfd   sp!, {r0-r3, r12, lr}
-        ldr     r12, =0x44          @ callback[1]
-        ldr     r12, [r12]
-        cmp     r12, #0
+        mov     r0, #0xFC           @ the IRQ callback
+        ldr     r0, [r0]
+        cmp     r0, #0
         movne   lr, pc
-        bxne    r12
+        bxne    r0
         bl      kernel_irq
         ldmfd   sp!, {r0-r3, r12, pc}^
 
@@ -80,11 +82,11 @@ irq_entry:
 fiq_entry:
         sub     lr, lr, #4
         stmfd   sp!, {r0-r3, r12, lr}
-        ldr     r12, =0x48          @ callback[2]
-        ldr     r12, [r12]
-        cmp     r12, #0
+        mov     r0, #0x100          @ the FIQ callback
+        ldr     r0, [r0]
+        cmp     r0, #0
         movne   lr, pc
-        bxne    r12
+        bxne    r0
         bl      kernel_fiq
         ldmfd   sp!, {r0-r3, r12, pc}^
 
@@ -163,7 +165,7 @@ launch:
 @ Runs from swi_entry in System mode; the routine returns with bx lr.
         .global swi_custom2
 swi_custom2:
-        ldr     r12, =0x40
+        mov     r12, #0xF8          @ the SWI2 callback
         ldr     r12, [r12]
         cmp     r12, #0
         beq     swi_reset

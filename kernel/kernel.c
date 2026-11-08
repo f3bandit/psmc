@@ -153,8 +153,8 @@ static u32 swi_set_cpu_speed(u32 speed) {
 
 static u32 swi_set_callbacks(u32 index, u32 proc) {
   if (index > 3) return 0;
-  u32 old = KV->callback[index];
-  KV->callback[index] = proc;
+  u32 old = K_CALLBACK[index];
+  K_CALLBACK[index] = proc;
   return old;
 }
 
@@ -250,7 +250,7 @@ static void fresh_hardware(void) {
   DAC_CTRL = 0;
   LCD_MODE = 0x58;            // on, frame rate 1
   swi_set_cpu_speed(7);
-  for (int i = 0; i < 4; i++) KV->callback[i] = 0;
+  for (int i = 0; i < 4; i++) K_CALLBACK[i] = 0;
   com_enable(0);
   INT_MASK = (1u << I_RTC) | (1u << I_DOCK);
 }
@@ -316,13 +316,13 @@ void kernel_irq(void) {
   if (pending & (1u << I_DOCK)) K_COMFLAGS |= CF_DOCK_IRQ;
   // Ours to clear: the clock tick and docking. The program's callback clears its own.
   INT_ACK = pending & ((1u << I_RTC) | (1u << I_DOCK));
-  if (!KV->callback[1]) INT_ACK = pending;   // no program handler: nothing else will
+  if (!K_CALLBACK[1]) INT_ACK = pending;   // no program handler: nothing else will
 }
 
 void kernel_fiq(void) {
   // The card port, when communication is on: still to do. Otherwise nothing is listening.
   u32 pending = INT_LATCH & INT_MASK & ((1u << I_COM) | (1u << I_TMR2));
-  if (!KV->callback[2]) {
+  if (!K_CALLBACK[2]) {
     INT_ACK = pending;
     if (pending & (1u << I_COM)) COM_MODE = 0;
   }
@@ -331,7 +331,7 @@ void kernel_fiq(void) {
 // --- power-on ------------------------------------------------------------------------------
 
 void kernel_boot(void) {
-  for (u32 a = 0x40; a < 0xC0; a += 4) *(volatile u32*)a = 0;   // (this runs on the stack at 800h)
+  for (u32 a = 0x40; a < 0x200; a += 4) *(volatile u32*)a = 0;   // (this runs on the stack at 800h)
   K_COMFLAGS = 0x70000;      // sound, infrared and LCD rotation handled on docking (the default)
   *(volatile u32*)0xC4 = 0;
   K_FUNC3 = 0;

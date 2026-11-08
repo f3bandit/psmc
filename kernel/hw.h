@@ -87,16 +87,18 @@ static inline u8 rd8(u32 a) {
 #define K_BU50 (*(volatile u8*)0xCA)
 #define K_ALARM ((volatile u32*)0xD8)
 #define K_SWITABLE (*(volatile u32*)0xE0)
+// The callbacks (SWI 01h) live at 0F8h..107h: SWI2, IRQ, FIQ, download notification. Some
+// programs (Rubato) write the IRQ one at 0FCh directly.
+#define K_CALLBACK ((volatile u32*)0xF8)
 
 struct KVars {               // at 040h
-  u32 callback[4];           // 040h: SWI2, IRQ, FIQ, download notification
-  u32 param;                 // 050h: for the next DoExecute
-  u16 dir_index;             // 054h: the running file (0 = the menu)
-  u16 next_index;            // 056h: prepared by PrepareExecute
-  u16 alt_index;             // 058h
-  u8 century;                // 05Ah: BCD
-  u8 com_on;                 // 05Bh
-  u8 docked_was;             // 05Ch
+  u32 param;                 // 040h: for the next DoExecute
+  u16 dir_index;             // 044h: the running file (0 = the menu)
+  u16 next_index;            // 046h: prepared by PrepareExecute
+  u16 alt_index;             // 048h
+  u8 century;                // 04Ah: BCD
+  u8 com_on;                 // 04Bh
+  u8 docked_was;             // 04Ch
   u8 pad[3];
-};                           // 05Dh..05Fh spare; 060h..0BFh the SWI stack
+};                           // 050h..05Fh spare; 060h..0BFh the SWI stack
 #define KV ((volatile struct KVars*)0x40)
