@@ -26,3 +26,5 @@ android/local.properties
 # written by local test runs
 app/*.mcd
 app/mcps.ini
+kernel/*.o
+kernel/kernel.elf

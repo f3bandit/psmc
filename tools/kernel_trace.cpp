@@ -86,6 +86,8 @@ struct Trace {
   static bool RamPc(u32 pc) { return pc < 0x800; }   // code copied to RAM by the app
 };
 
+static std::set<std::string> g_speed_waits;
+
 static void OnSwi(void* ctx, u32 num, u32 from) {
   Trace& t = *(Trace*)ctx;
   auto& r = t.m->cpu->state.reg;
@@ -101,6 +103,11 @@ static void OnExRet(void* ctx, u32 to, u32 r0) {
   for (size_t i = t.pending.size(); i-- > 0;) {
     auto& p = t.pending[i];
     if ((to & ~1u) != (p.ret & ~1u)) continue;
+    if (p.num == 4) {   // what the flash and ROM wait states are left at for each speed
+      char b[64];
+      snprintf(b, sizeof b, "speed %x: rom wait %x flash ctrl %x", p.r0 & 0xF, t.m->mem.boot_wait, t.m->mem.fdc);
+      g_speed_waits.insert(b);
+    }
     auto& c = (p.app ? t.app_swi : t.kernel_swi)[p.num];
     c.n++;
     if (c.examples.size() < 6) {
@@ -122,10 +129,10 @@ static void OnEntry(void* ctx, u32 to) {
     char b[400];
     snprintf(b, sizeof b,
              "entry %08x cpsr %08x r0 %x sp %x | int mask %04x | clock %d | timers en %d%d%d div %d%d%d load %x %x %x | lcd dismod %x fr %x "
-             "dison %d rot %d cpen %d | ir static %x | dac %d | bank %s",
+             "dison %d rot %d cpen %d | ir static %x | dac %d | pio dir %x out %x | lvd %x | lcd cal %x | memctl wait %x %x | tmr value %x %x %x%s",
              to, st.cpsr.v, st.reg[0], st.reg[13], m.intc.mask, m.clk.freq, m.tmr.en[0], m.tmr.en[1], m.tmr.en[2], m.tmr.div[0], m.tmr.div[1],
              m.tmr.div[2], m.tmr.load[0], m.tmr.load[1], m.tmr.load[2], m.lcd.dismod, m.lcd.fr, m.lcd.dison, m.lcd.rot,
-             m.lcd.cpen, m.irda_static, m.dac.active, "");
+             m.lcd.cpen, m.irda_static, m.dac.active, m.pio.dir, m.pio.out, m.lvd_ctrl, m.lcd.cal, m.mem.boot_wait, m.mem.fdc, m.tmr.value[0], m.tmr.value[1], m.tmr.value[2], "");
     t.entry = b;
   }
 }
@@ -279,6 +286,8 @@ int main(int argc, char** argv) {
   }
   printf("\n== Totals: apps using each call\n");
   for (auto& [n, c] : g_app_swi_apps) printf("  SWI %02x  %ld apps\n", n, c);
+  printf("== Wait states after SetCpuSpeed\n");
+  for (auto& w : g_speed_waits) printf("  %s\n", w.c_str());
   printf("== Totals: apps touching each kernel RAM word\n");
   for (auto& [a, c] : g_ram_apps) printf("  RAM %03x  %ld apps\n", a, c);
 }

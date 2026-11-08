@@ -92,6 +92,8 @@ int main(int argc, char** argv) {
   for (int i = 0; i < 6; i++) Press(base, BTN_ENTER);
   base.RunFor(2.0);
   if (!KernelScreen(base)) { fprintf(stderr, "base unit isn't on the clock\n"); return 1; }
+  base.SetClock(0x07123000, 0x00261107);   // the same moment for every BIOS: Sat 2026-11-07 12:30:00
+  base.RunFor(0.5);
   auto home = base.SaveState();
 
   for (int fi = 3; fi < argc; fi++) {
@@ -133,6 +135,7 @@ int main(int argc, char** argv) {
       m.RunFor(3.0);
       bool started = !KernelScreen(m);
       std::string s_start = Screen(m);
+      m.TakeAudio();   // the menu's own sounds (a click on starting the app) aren't the app's
 
       // Play: a press every 0.4 s, cycling through the buttons, Fire most often; watch.
       std::set<std::string> screens;
